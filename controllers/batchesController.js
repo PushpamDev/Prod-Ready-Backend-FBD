@@ -39,6 +39,33 @@ const createBatch = async (req, res) => {
   }
 
   try {
+    // Check for faculty availability
+    const { data: existingBatches, error: existingBatchesError } = await supabase
+      .from('batches')
+      .select('start_time, end_time, days_of_week')
+      .eq('faculty_id', facultyId);
+
+    if (existingBatchesError) {
+      throw existingBatchesError;
+    }
+
+    const newStartTime = new Date(`1970-01-01T${startTime}`);
+    const newEndTime = new Date(`1970-01-01T${endTime}`);
+
+    for (const batch of existingBatches) {
+      const existingStartTime = new Date(`1970-01-01T${batch.start_time}`);
+      const existingEndTime = new Date(`1970-01-01T${batch.end_time}`);
+
+      const daysOverlap = daysOfWeek.some(day => batch.days_of_week.includes(day));
+
+      if (
+        daysOverlap &&
+        newStartTime < existingEndTime &&
+        newEndTime > existingStartTime
+      ) {
+        return res.status(409).json({ error: 'Faculty has a scheduling conflict with another batch.' });
+      }
+    }
     const { data: batchData, error: batchError } = await supabase
       .from('batches')
       .insert([
