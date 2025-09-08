@@ -14,11 +14,11 @@ const getAllStudents = async (req, res) => {
 };
 
 const createStudent = async (req, res) => {
-  const { name, admission_number, phone_number } = req.body;
+  const { name, admission_number, phone_number, remarks } = req.body;
 
   const { data, error } = await supabase
     .from('students')
-    .insert([{ name, admission_number, phone_number }])
+    .insert([{ name, admission_number, phone_number, remarks }])
     .select();
 
   if (error) {
@@ -31,11 +31,11 @@ const createStudent = async (req, res) => {
 
 const updateStudent = async (req, res) => {
   const { id } = req.params;
-  const { name, admission_number, phone_number } = req.body;
+  const { name, admission_number, phone_number, remarks } = req.body;
 
   const { data, error } = await supabase
     .from('students')
-    .update({ name, admission_number, phone_number })
+    .update({ name, admission_number, phone_number, remarks })
     .eq('id', id)
     .select();
 
