@@ -9,6 +9,7 @@ const freeSlotsRoutes = require("./routes/freeSlots");
 const activityRoutes = require("./routes/activity");
 const userRoutes = require("./routes/user");
 const studentRoutes = require("./routes/students");
+const suggestionRoutes = require("./routes/suggestion");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -26,6 +27,7 @@ app.use("/api/free-slots", freeSlotsRoutes);
 app.use("/api/activities", activityRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/students", studentRoutes);
+app.use("/api/suggestions", suggestionRoutes);
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
