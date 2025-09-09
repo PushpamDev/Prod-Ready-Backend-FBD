@@ -42,7 +42,7 @@ const createBatch = async (req, res) => {
     // Check for faculty availability
     const { data: existingBatches, error: existingBatchesError } = await supabase
       .from('batches')
-      .select('start_time, end_time, days_of_week')
+      .select('name, start_time, end_time, days_of_week')
       .eq('faculty_id', facultyId);
 
     if (existingBatchesError) {
@@ -63,7 +63,9 @@ const createBatch = async (req, res) => {
         newStartTime < existingEndTime &&
         newEndTime > existingStartTime
       ) {
-        return res.status(409).json({ error: 'Faculty has a scheduling conflict with another batch.' });
+        return res.status(409).json({
+          error: `Faculty has a scheduling conflict with batch: ${batch.name}.`,
+        });
       }
     }
     const { data: batchData, error: batchError } = await supabase
@@ -106,6 +108,20 @@ const createBatch = async (req, res) => {
 
     res.status(201).json(data);
   } catch (error) {
+    if (error.code === '23505' && error.message.includes('batches_name_key')) {
+      return res.status(409).json({ error: `A batch with the name '${name}' already exists.` });
+    }
+    if (error.code === '23503') {
+      if (error.message.includes('batches_faculty_id_fkey')) {
+        return res.status(400).json({ error: `Faculty with ID ${facultyId} does not exist.` });
+      }
+      if (error.message.includes('batches_skill_id_fkey')) {
+        return res.status(400).json({ error: `Skill with ID ${skillId} does not exist.` });
+      }
+      if (error.message.includes('batch_students_student_id_fkey')) {
+        return res.status(400).json({ error: 'One or more student IDs are invalid.' });
+      }
+    }
     res.status(500).json({ error: error.message });
   }
 };
