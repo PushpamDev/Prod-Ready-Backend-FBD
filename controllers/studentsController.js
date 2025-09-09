@@ -1,16 +1,16 @@
 const supabase = require('../db');
 
 const getAllStudents = async (req, res) => {
-  const { data, error } = await supabase
+  const { data, error, count } = await supabase
     .from('students')
-    .select('*');
+    .select('*', { count: 'exact' });
 
   if (error) {
     res.status(500).json({ error: error.message });
     return;
   }
 
-  res.status(200).json(data);
+  res.status(200).json({ students: data, count });
 };
 
 const createStudent = async (req, res) => {
