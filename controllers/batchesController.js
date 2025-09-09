@@ -39,6 +39,38 @@ const createBatch = async (req, res) => {
   }
 
   try {
+    // Check faculty availability
+    const { data: facultyAvailability, error: availabilityError } = await supabase
+      .from('faculty_availability')
+      .select('day_of_week, start_time, end_time')
+      .eq('faculty_id', facultyId);
+
+    if (availabilityError) {
+      throw availabilityError;
+    }
+
+    const newStartTime = new Date(`1970-01-01T${startTime}`);
+    const newEndTime = new Date(`1970-01-01T${endTime}`);
+
+    for (const day of daysOfWeek) {
+      const availabilityForDay = facultyAvailability.find(a => a.day_of_week === day);
+
+      if (!availabilityForDay) {
+        return res.status(400).json({
+          error: `Faculty is not available on ${day}.`,
+        });
+      }
+
+      const facultyStartTime = new Date(`1970-01-01T${availabilityForDay.start_time}`);
+      const facultyEndTime = new Date(`1970-01-01T${availabilityForDay.end_time}`);
+
+      if (newStartTime < facultyStartTime || newEndTime > facultyEndTime) {
+        return res.status(400).json({
+          error: `Batch time on ${day} is outside of faculty's available hours (${availabilityForDay.start_time} - ${availabilityForDay.end_time}).`,
+        });
+      }
+    }
+
     // Check for faculty availability
     const { data: existingBatches, error: existingBatchesError } = await supabase
       .from('batches')
@@ -48,9 +80,6 @@ const createBatch = async (req, res) => {
     if (existingBatchesError) {
       throw existingBatchesError;
     }
-
-    const newStartTime = new Date(`1970-01-01T${startTime}`);
-    const newEndTime = new Date(`1970-01-01T${endTime}`);
 
     for (const batch of existingBatches) {
       const existingStartTime = new Date(`1970-01-01T${batch.start_time}`);
