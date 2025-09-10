@@ -49,11 +49,11 @@ const createBatch = async (req, res) => {
       throw availabilityError;
     }
 
-    const newStartTime = new Date(`1970-01-01T${startTime}`);
-    const newEndTime = new Date(`1970-01-01T${endTime}`);
+    const newStartTime = new Date(`1970-01-01T${startTime}Z`);
+    const newEndTime = new Date(`1970-01-01T${endTime}Z`);
 
     for (const day of daysOfWeek) {
-      const availabilityForDay = facultyAvailability.find(a => a.day_of_week === day);
+      const availabilityForDay = facultyAvailability.find(a => a.day_of_week.toLowerCase() === day.toLowerCase());
 
       if (!availabilityForDay) {
         return res.status(400).json({
@@ -61,8 +61,8 @@ const createBatch = async (req, res) => {
         });
       }
 
-      const facultyStartTime = new Date(`1970-01-01T${availabilityForDay.start_time}`);
-      const facultyEndTime = new Date(`1970-01-01T${availabilityForDay.end_time}`);
+      const facultyStartTime = new Date(`1970-01-01T${availabilityForDay.start_time}Z`);
+      const facultyEndTime = new Date(`1970-01-01T${availabilityForDay.end_time}Z`);
 
       if (newStartTime < facultyStartTime || newEndTime > facultyEndTime) {
         return res.status(400).json({
@@ -82,10 +82,10 @@ const createBatch = async (req, res) => {
     }
 
     for (const batch of existingBatches) {
-      const existingStartTime = new Date(`1970-01-01T${batch.start_time}`);
-      const existingEndTime = new Date(`1970-01-01T${batch.end_time}`);
+      const existingStartTime = new Date(`1970-01-01T${batch.start_time}Z`);
+      const existingEndTime = new Date(`1970-01-01T${batch.end_time}Z`);
 
-      const daysOverlap = daysOfWeek.some(day => batch.days_of_week.includes(day));
+      const daysOverlap = daysOfWeek.some(day => batch.days_of_week.map(d => d.toLowerCase()).includes(day.toLowerCase()));
 
       if (
         daysOverlap &&
