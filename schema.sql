@@ -5,15 +5,16 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 DROP TABLE IF EXISTS public.batch_students;
 DROP TABLE IF EXISTS public.faculty_availability;
 DROP TABLE IF EXISTS public.faculty_skills;
+DROP TABLE IF EXISTS public.student_attendance;
 DROP TABLE IF EXISTS public.batches;
 DROP TABLE IF EXISTS public.faculty;
 DROP TABLE IF EXISTS public.skills;
 DROP TABLE IF EXISTS public.students;
 DROP TABLE IF EXISTS public.users;
+DROP TABLE IF EXISTS public.activities;
 DROP TYPE IF EXISTS public.user_role;
 
 -- Skills Table
--- This table stores the various skills that a faculty member can possess.
 CREATE TABLE public.skills (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL UNIQUE,
@@ -24,7 +25,6 @@ CREATE TABLE public.skills (
 COMMENT ON TABLE public.skills IS 'List of skills that faculty members can have.';
 
 -- Faculty Table
--- This table holds the core information about each faculty member.
 CREATE TABLE public.faculty (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
@@ -40,7 +40,6 @@ COMMENT ON TABLE public.faculty IS 'Information about faculty members.';
 CREATE TYPE public.user_role AS ENUM ('admin', 'faculty');
 
 -- Users Table
--- This table is for authentication and authorization.
 CREATE TABLE public.users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username TEXT UNIQUE,
@@ -59,12 +58,12 @@ CREATE TABLE public.students (
     name TEXT NOT NULL,
     admission_number TEXT NOT NULL UNIQUE,
     phone_number TEXT,
+    remarks TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 COMMENT ON TABLE public.students IS 'Information about students.';
 
 -- Batches Table
--- This table is for managing student batches.
 CREATE TABLE public.batches (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL UNIQUE,
@@ -91,7 +90,6 @@ CREATE TABLE public.batch_students (
 COMMENT ON TABLE public.batch_students IS 'Maps students to their batches.';
 
 -- Faculty Skills Junction Table
--- This table links faculty members to their skills, creating a many-to-many relationship.
 CREATE TABLE public.faculty_skills (
     faculty_id UUID NOT NULL REFERENCES public.faculty(id) ON DELETE CASCADE,
     skill_id UUID NOT NULL REFERENCES public.skills(id) ON DELETE CASCADE,
@@ -100,7 +98,6 @@ CREATE TABLE public.faculty_skills (
 COMMENT ON TABLE public.faculty_skills IS 'Maps faculty to their skills.';
 
 -- Faculty Availability Table
--- This table is used to track the free slots of faculty members.
 CREATE TABLE public.faculty_availability (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     faculty_id UUID NOT NULL REFERENCES public.faculty(id) ON DELETE CASCADE,
@@ -112,17 +109,7 @@ CREATE TABLE public.faculty_availability (
 );
 COMMENT ON TABLE public.faculty_availability IS 'Stores recurring weekly free time slots for faculty members.';
 
--- Add indexes for foreign keys to improve query performance
-CREATE INDEX idx_faculty_skills_faculty_id ON public.faculty_skills(faculty_id);
-CREATE INDEX idx_faculty_skills_skill_id ON public.faculty_skills(skill_id);
-CREATE INDEX idx_faculty_availability_faculty_id ON public.faculty_availability(faculty_id);
-CREATE INDEX idx_batches_faculty_id ON public.batches(faculty_id);
-CREATE INDEX idx_batches_skill_id ON public.batches(skill_id);
-CREATE INDEX idx_batch_students_batch_id ON public.batch_students(batch_id);
-CREATE INDEX idx_batch_students_student_id ON public.batch_students(student_id);
-
 -- Activities Table
--- This table logs various activities within the system.
 CREATE TABLE public.activities (
     id bigserial PRIMARY KEY,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -132,3 +119,39 @@ CREATE TABLE public.activities (
     type character varying
 );
 COMMENT ON TABLE public.activities IS 'Logs activities such as creations, updates, and deletions.';
+
+-- Student Attendance Table
+CREATE TABLE public.student_attendance (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
+    batch_id UUID NOT NULL REFERENCES public.batches(id) ON DELETE CASCADE,
+    date DATE NOT NULL,
+    is_present BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT student_attendance_unique UNIQUE (batch_id, student_id, date)
+);
+COMMENT ON TABLE public.student_attendance IS 'Stores student attendance for each batch and date.';
+
+-- Add indexes for foreign keys to improve query performance
+CREATE INDEX idx_faculty_skills_faculty_id ON public.faculty_skills(faculty_id);
+CREATE INDEX idx_faculty_skills_skill_id ON public.faculty_skills(skill_id);
+CREATE INDEX idx_faculty_availability_faculty_id ON public.faculty_availability(faculty_id);
+CREATE INDEX idx_batches_faculty_id ON public.batches(faculty_id);
+CREATE INDEX idx_batches_skill_id ON public.batches(skill_id);
+CREATE INDEX idx_batch_students_batch_id ON public.batch_students(batch_id);
+CREATE INDEX idx_batch_students_student_id ON public.batch_students(student_id);
+CREATE INDEX idx_student_attendance_student_id ON public.student_attendance(student_id);
+CREATE INDEX idx_student_attendance_batch_id ON public.student_attendance(batch_id);
+
+
+-- Grant all permissions to the service_role for all tables
+GRANT ALL ON TABLE public.users TO service_role;
+GRANT ALL ON TABLE public.faculty TO service_role;
+GRANT ALL ON TABLE public.skills TO service_role;
+GRANT ALL ON TABLE public.faculty_skills TO service_role;
+GRANT ALL ON TABLE public.faculty_availability TO service_role;
+GRANT ALL ON TABLE public.batches TO service_role;
+GRANT ALL ON TABLE public.students TO service_role;
+GRANT ALL ON TABLE public.batch_students TO service_role;
+GRANT ALL ON TABLE public.activities TO service_role;
+GRANT ALL ON TABLE public.student_attendance TO service_role;

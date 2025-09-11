@@ -67,5 +67,5 @@ module.exports = {
   getAllStudents,
   createStudent,
   updateStudent,
-  deleteStudent,
+  deleteStudent
 };
