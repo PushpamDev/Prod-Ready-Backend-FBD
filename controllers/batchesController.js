@@ -207,6 +207,9 @@ const updateBatch = async (req, res) => {
 
     res.json(data);
   } catch (error) {
+    if (error.code === '23503' && error.message.includes('batch_students_student_id_fkey')) {
+      return res.status(400).json({ error: 'One or more student IDs are invalid.' });
+    }
     res.status(500).json({ error: error.message });
   }
 };
