@@ -177,9 +177,11 @@ const updateBatch = async (req, res) => {
     if (deleteError) throw deleteError;
 
     if (studentIds && studentIds.length > 0) {
-      const batchStudentData = studentIds.map((studentId) => ({ batch_id: id, student_id: studentId }));
-      const { error: insertError } = await supabase.from('batch_students').insert(batchStudentData);
-      if (insertError) throw insertError;
+      const batchStudentData = studentIds.filter(Boolean).map((studentId) => ({ batch_id: id, student_id: studentId }));
+      if (batchStudentData.length > 0) {
+        const { error: insertError } = await supabase.from('batch_students').insert(batchStudentData);
+        if (insertError) throw insertError;
+      }
     }
 
     const { data, error } = await supabase
@@ -191,8 +193,8 @@ const updateBatch = async (req, res) => {
         end_date: endDate,
         start_time: startTime,
         end_time: endTime,
-        faculty_id: facultyId,
-        skill_id: skillId,
+        faculty_id: facultyId || null,
+        skill_id: skillId || null,
         max_students: maxStudents,
         status,
         days_of_week: daysOfWeek,
