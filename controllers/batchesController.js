@@ -6,7 +6,7 @@ const getAllBatches = async (req, res) => {
     let query = supabase.from('batches').select('*, faculty:faculty_id(*), skill:skill_id(*), students:students(*)');
 
     // If the user is a faculty, only return batches assigned to them
-    if (req.user.role === 'faculty') {
+    if (req.user && req.user.role === 'faculty') {
       query = query.eq('faculty_id', req.user.faculty_id);
     }
 
