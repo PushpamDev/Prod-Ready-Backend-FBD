@@ -11,6 +11,7 @@ const userRoutes = require("./routes/user");
 const studentRoutes = require("./routes/students");
 const suggestionRoutes = require("./routes/suggestion");
 const attendanceRoutes = require('./routes/attendanceRoutes');
+const viewBatchRoutes = require("./routes/viewBatch");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -23,6 +24,7 @@ app.use(express.json());
 app.use("/api/faculty", facultyRoutes);
 app.use("/api/availability", availabilityRoutes);
 app.use("/api/batches", auth, batchesRoutes);
+app.use("/api/view-batch", viewBatchRoutes);
 app.use("/api/skills", skillsRoutes);
 app.use("/api/free-slots", freeSlotsRoutes);
 app.use("/api/activities", activityRoutes);
