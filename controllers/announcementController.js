@@ -21,16 +21,16 @@ const getAnnouncements = async (req, res) => {
 };
 
 const createAnnouncement = async (req, res) => {
-    const { title, message, scope, batchId } = req.body;
+    const { title, message, scope, batch_id } = req.body;
 
-    if (scope === 'batch' && !batchId) {
+    if (scope === 'batch' && !batch_id) {
         return res.status(400).json({ error: 'A batch must be selected to create a batch-specific announcement.' });
     }
 
     try {
         const { data, error } = await supabase
             .from('announcements')
-            .insert([{ title, message, scope, batch_id: scope === 'batch' ? batchId : null }])
+            .insert([{ title, message, scope, batch_id: scope === 'batch' ? batch_id : null }])
             .select();
 
         if (error) {
