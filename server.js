@@ -12,6 +12,7 @@ const studentRoutes = require("./routes/students");
 const suggestionRoutes = require("./routes/suggestion");
 const attendanceRoutes = require('./routes/attendanceRoutes');
 const viewBatchRoutes = require("./routes/viewBatch");
+const announcementRoutes = require("./routes/announcements");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -32,6 +33,7 @@ app.use("/api/users", userRoutes);
 app.use("/api/students", studentRoutes);
 app.use("/api/suggestions", suggestionRoutes);
 app.use('/api/attendance', attendanceRoutes);
+app.use("/api/announcements", auth, announcementRoutes);
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
