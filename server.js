@@ -33,7 +33,7 @@ app.use("/api/users", userRoutes);
 app.use("/api/students", studentRoutes);
 app.use("/api/suggestions", suggestionRoutes);
 app.use('/api/attendance', attendanceRoutes);
-app.use("/api/announcements", auth, announcementRoutes);
+app.use("/api/announcements",announcementRoutes);
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
