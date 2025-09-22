@@ -155,3 +155,26 @@ GRANT ALL ON TABLE public.students TO service_role;
 GRANT ALL ON TABLE public.batch_students TO service_role;
 GRANT ALL ON TABLE public.activities TO service_role;
 GRANT ALL ON TABLE public.student_attendance TO service_role;
+
+-- Create the announcements table
+CREATE TABLE public.announcements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('all', 'batch')),
+    batch_id UUID REFERENCES public.batches(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT scope_batch_consistency CHECK (
+        (scope = 'all' AND batch_id IS NULL) OR
+        (scope = 'batch' AND batch_id IS NOT NULL)
+    )
+);
+COMMENT ON TABLE public.announcements IS 'Stores announcements for all users or specific batches.';
+
+-- Create indexes for faster querying
+CREATE INDEX idx_announcements_scope ON public.announcements(scope);
+CREATE INDEX idx_announcements_batch_id ON public.announcements(batch_id);
+CREATE INDEX idx_announcements_created_at ON public.announcements(created_at DESC);
+
+-- Grant all permissions to the service_role for the announcements table
+GRANT ALL ON TABLE public.announcements TO service_role;
