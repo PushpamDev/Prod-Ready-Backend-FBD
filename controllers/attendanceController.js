@@ -4,7 +4,7 @@ const getAttendanceByBatch = async (req, res) => {
   const { facultyId, batchId, date } = req.params;
 
   try {
-    const formattedDate = new Date(date).toISOString().split('T')[0];
+    const formattedDate = date.substring(0, 10);
     const { data, error } = await supabase
       .from('student_attendance')
       .select('*, student:students(*)')
@@ -25,7 +25,7 @@ const addOrUpdateAttendance = async (req, res) => {
   const { batchId, date, attendance } = req.body;
 
   try {
-    const formattedDate = new Date(date).toISOString().split('T')[0];
+    const formattedDate = date.substring(0, 10);
 
     const records = attendance.map(item => ({
       batch_id: batchId,
