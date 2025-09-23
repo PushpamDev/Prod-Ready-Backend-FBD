@@ -51,6 +51,8 @@ const createBatch = async (req, res) => {
 
     const newStartTime = new Date(`1970-01-01T${startTime}Z`);
     const newEndTime = new Date(`1970-01-01T${endTime}Z`);
+    const newStartDate = new Date(startDate);
+    const newEndDate = new Date(endDate);
 
     for (const day of daysOfWeek) {
       const availabilityForDay = facultyAvailability.find(a => a.day_of_week.toLowerCase() === day.toLowerCase());
@@ -74,8 +76,9 @@ const createBatch = async (req, res) => {
     // Check for faculty availability
     const { data: existingBatches, error: existingBatchesError } = await supabase
       .from('batches')
-      .select('name, start_time, end_time, days_of_week')
-      .eq('faculty_id', facultyId);
+      .select('name, start_time, end_time, days_of_week, start_date, end_date')
+      .eq('faculty_id', facultyId)
+      .neq('status', 'Completed');
 
     if (existingBatchesError) {
       throw existingBatchesError;
@@ -84,11 +87,15 @@ const createBatch = async (req, res) => {
     for (const batch of existingBatches) {
       const existingStartTime = new Date(`1970-01-01T${batch.start_time}Z`);
       const existingEndTime = new Date(`1970-01-01T${batch.end_time}Z`);
+      const existingStartDate = new Date(batch.start_date);
+      const existingEndDate = new Date(batch.end_date);
 
       const daysOverlap = daysOfWeek.some(day => batch.days_of_week.map(d => d.toLowerCase()).includes(day.toLowerCase()));
+      const datesOverlap = newStartDate <= existingEndDate && newEndDate >= existingStartDate;
 
       if (
         daysOverlap &&
+        datesOverlap &&
         newStartTime < existingEndTime &&
         newEndTime > existingStartTime
       ) {
