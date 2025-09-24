@@ -1,109 +1,121 @@
-const supabase = require('../db');
+const supabase = require('../db.js');
 
+// --- Helper Functions (no changes) ---
+const parseDaysOfWeek = (daysField) => {
+    if (Array.isArray(daysField)) return daysField;
+    if (typeof daysField === 'string') return daysField.replace(/[{}"'\\\[\\\]]/g, '').split(',').map(d => d.trim());
+    return [];
+};
+const timeToMinutes = (timeStr) => {
+    if (!timeStr || typeof timeStr !== 'string' || !timeStr.includes(':')) return 0;
+    const [hours, minutes] = timeStr.split(':').map(Number);
+    return hours * 60 + minutes;
+};
+const minutesToTime = (minutes) => {
+    const h = Math.floor(minutes / 60).toString().padStart(2, '0');
+    const m = (minutes % 60).toString().padStart(2, '0');
+    return `${h}:${m}`;
+};
+
+// --- Main Controller ---
 const suggestFaculty = async (req, res) => {
-    const { skillId, startDate, endDate, startTime, endTime, daysOfWeek } = req.body;
+    // Now accepts optional startTime and endTime
+    const { skillId, startDate, endDate, daysOfWeek, startTime, endTime } = req.body;
 
-    if (!skillId || !startDate || !endDate || !startTime || !endTime || !daysOfWeek || !Array.isArray(daysOfWeek)) {
-        return res.status(400).json({ error: 'skillId, startDate, endDate, startTime, endTime, and a daysOfWeek array are required' });
+    if (!skillId || !startDate || !endDate || !daysOfWeek || !Array.isArray(daysOfWeek) || daysOfWeek.length === 0) {
+        return res.status(400).json({ error: 'Required fields are missing.' });
     }
 
     try {
-        // 1. Fetch all faculty who have the required skill, along with their general availability.
+        // Step 1 & 2: Fetch relevant faculty and their potential batch conflicts (no changes here)
         const { data: facultyWithSkill, error: facultyError } = await supabase
-            .from('faculty_skills')
-            .select(`
-                faculty (
-                    id,
-                    name,
-                    availability:faculty_availability ( day_of_week, start_time, end_time )
-                )
-            `)
-            .eq('skill_id', skillId);
-
+            .from('faculty_skills').select(`faculty (id, name, availability:faculty_availability (day_of_week, start_time, end_time))`).eq('skill_id', skillId);
         if (facultyError) throw facultyError;
 
-        // Un-nest the faculty objects
         const skilledFaculty = facultyWithSkill.map(item => item.faculty).filter(Boolean);
-
-        if (skilledFaculty.length === 0) {
-            return res.json({ suggestions: [] });
-        }
+        if (skilledFaculty.length === 0) return res.json({ suggestions: [] });
 
         const facultyIds = skilledFaculty.map(f => f.id);
-
-        // 2. Fetch all batches for these specific faculties that overlap with the given date range
         const { data: potentiallyConflictingBatches, error: batchesError } = await supabase
-            .from('batches')
-            .select('id, start_date, end_date, start_time, end_time, days_of_week, faculty_id')
-            .in('faculty_id', facultyIds)
-            .lte('start_date', endDate)
-            .gte('end_date', startDate);
-
+            .from('batches').select('start_time, end_time, days_of_week, faculty_id').in('faculty_id', facultyIds).lte('start_date', endDate).gte('end_date', startDate);
         if (batchesError) throw batchesError;
+        
+        // Step 3: First, calculate all common available slots for each faculty
+        const facultyWithCommonSlots = skilledFaculty.map(faculty => {
+            const dailySlots = daysOfWeek.map(day => {
+                const dayAvailability = faculty.availability.find(a => a.day_of_week.toLowerCase() === day.toLowerCase());
+                if (!dayAvailability) return { day, slots: [] };
 
-        const timeToMinutes = (timeStr) => {
-            if (!timeStr) return 0;
-            const [hours, minutes] = timeStr.split(':').map(Number);
-            return hours * 60 + minutes;
-        };
-
-        const newBatchStartMins = timeToMinutes(startTime);
-        const newBatchEndMins = timeToMinutes(endTime);
-        const requestedDaysSet = new Set(daysOfWeek.map(d => d.toLowerCase()));
-
-        const availableFaculty = skilledFaculty.filter(faculty => {
-            // A. Check general availability for all required days
-            const hasGeneralAvailability = [...requestedDaysSet].every(day => {
-                const dayAvailability = faculty.availability.find(a => a.day_of_week.toLowerCase() === day);
-                if (!dayAvailability) return false;
-
-                const availableStartMins = timeToMinutes(dayAvailability.start_time);
-                const availableEndMins = timeToMinutes(dayAvailability.end_time);
-
-                return newBatchStartMins >= availableStartMins && newBatchEndMins <= availableEndMins;
+                let freeSlotsInMinutes = [{ start: timeToMinutes(dayAvailability.start_time), end: timeToMinutes(dayAvailability.end_time) }];
+                const bookedSlots = potentiallyConflictingBatches
+                    .filter(b => {
+                        if (b.faculty_id !== faculty.id) return false;
+                        const batchDays = parseDaysOfWeek(b.days_of_week);
+                        return batchDays.some(batchDay => batchDay.toLowerCase() === day.toLowerCase());
+                    })
+                    .map(b => ({ start: timeToMinutes(b.start_time), end: timeToMinutes(b.end_time) }))
+                    .sort((a, b) => a.start - b.start);
+                
+                for (const booked of bookedSlots) {
+                    const nextFreeSlots = [];
+                    for (const free of freeSlotsInMinutes) {
+                        if (free.start < booked.start) nextFreeSlots.push({ start: free.start, end: Math.min(free.end, booked.start) });
+                        if (free.end > booked.end) nextFreeSlots.push({ start: Math.max(free.start, booked.end), end: free.end });
+                    }
+                    freeSlotsInMinutes = nextFreeSlots;
+                }
+                return { day, slots: freeSlotsInMinutes };
             });
 
-            if (!hasGeneralAvailability) {
-                return false;
+            // Calculate the INTERSECTION of slots across all requested days
+            let commonSlots = dailySlots.length > 0 ? dailySlots[0].slots : [];
+            for (let i = 1; i < dailySlots.length; i++) {
+                const nextCommonSlots = [];
+                for (const common of commonSlots) {
+                    for (const daySlot of dailySlots[i].slots) {
+                        const overlapStart = Math.max(common.start, daySlot.start);
+                        const overlapEnd = Math.min(common.end, daySlot.end);
+                        if (overlapStart < overlapEnd) nextCommonSlots.push({ start: overlapStart, end: overlapEnd });
+                    }
+                }
+                commonSlots = nextCommonSlots;
             }
-
-            // B. Check for conflicting batches
-            const facultyBatches = potentiallyConflictingBatches.filter(b => b.faculty_id === faculty.id);
             
-            const hasConflict = facultyBatches.some(batch => {
-                // Check for day of week overlap
-                let batchDays = [];
-                if (Array.isArray(batch.days_of_week)) {
-                    batchDays = batch.days_of_week;
-                } else if (typeof batch.days_of_week === 'string') {
-                    batchDays = batch.days_of_week.replace(/[{}\"\'\\\\\\[\\\\\\]]/g, '').split(',').map(d => d.trim());
+            return {
+                id: faculty.id,
+                name: faculty.name,
+                commonSlots: commonSlots.map(s => ({ start: minutesToTime(s.start), end: minutesToTime(s.end) }))
+            };
+        }).filter(f => f.commonSlots.length > 0);
+
+
+        // Step 4: Categorize the faculty based on whether a specific time was requested
+        let suggestions;
+        if (startTime && endTime) {
+            const requestedStartMins = timeToMinutes(startTime);
+            const requestedEndMins = timeToMinutes(endTime);
+
+            suggestions = facultyWithCommonSlots.map(faculty => {
+                const isAvailable = faculty.commonSlots.some(slot => 
+                    timeToMinutes(slot.start) <= requestedStartMins && timeToMinutes(slot.end) >= requestedEndMins
+                );
+
+                if (isAvailable) {
+                    return { ...faculty, status: 'available' };
+                } else {
+                    return { ...faculty, status: 'available_other_times' };
                 }
-                const batchDaysSet = new Set(batchDays.map(d => d.toLowerCase()));
-                const daysOverlap = [...requestedDaysSet].some(day => batchDaysSet.has(day));
-
-                if (!daysOverlap) {
-                    return false; // No conflict if days don't overlap
-                }
-
-                // Check for time overlap
-                const existingBatchStartMins = timeToMinutes(batch.start_time);
-                const existingBatchEndMins = timeToMinutes(batch.end_time);
-
-                const timeConflict = newBatchStartMins < existingBatchEndMins && newBatchEndMins > existingBatchStartMins;
-
-                return timeConflict;
             });
-
-            return !hasConflict;
-        });
-
-        const suggestions = availableFaculty.map(f => ({ id: f.id, name: f.name }));
+        } else {
+            // If no specific time is given, all faculty with slots are 'available'
+            suggestions = facultyWithCommonSlots.map(faculty => ({ ...faculty, status: 'available' }));
+        }
 
         res.json({ suggestions });
 
     } catch (error) {
         console.error('Error suggesting faculty:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ error: 'Internal server error', details: error.message });
     }
 };
 
