@@ -1,6 +1,24 @@
 const supabase = require('../db');
 const { logActivity } = require('./logActivity');
 
+const getDynamicStatus = (startDate, endDate) => {
+  const now = new Date();
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  now.setHours(0, 0, 0, 0);
+  start.setHours(0, 0, 0, 0);
+  end.setHours(0, 0, 0, 0);
+
+  if (now < start) {
+    return 'Upcoming';
+  } else if (now >= start && now <= end) {
+    return 'active';
+  } else {
+    return 'Completed';
+  }
+};
+
 const getAllBatches = async (req, res) => {
   try {
     const query = supabase
@@ -19,10 +37,14 @@ const getAllBatches = async (req, res) => {
     const { data, error } = await query;
     if (error) throw error;
 
-    const formattedData = data.map(batch => ({
-      ...batch,
-      students: batch.students.map(s => s.students).filter(Boolean)
-    }));
+    const formattedData = data.map(batch => {
+      const status = getDynamicStatus(batch.start_date, batch.end_date);
+      return {
+        ...batch,
+        status,
+        students: batch.students.map(s => s.students).filter(Boolean)
+      };
+    });
 
     res.json(formattedData);
   } catch (error) {
@@ -97,6 +119,7 @@ const createBatch = async (req, res) => {
         start_time: startTime, end_time: endTime,
         faculty_id: facultyId, skill_id: skillId,
         max_students: maxStudents, days_of_week: daysOfWeek,
+        status,
       }])
       .select('id, name')
       .single();
@@ -144,7 +167,9 @@ const updateBatch = async (req, res) => {
   } = req.body;
 
   try {
-    // This "delete and replace" strategy for students is effective and remains.
+    const status = getDynamicStatus(startDate, endDate);
+
+    // This \"delete and replace\" strategy for students is effective and remains.
     const { error: deleteError } = await supabase.from('batch_students').delete().eq('batch_id', id);
     if (deleteError) throw deleteError;
 
@@ -164,6 +189,7 @@ const updateBatch = async (req, res) => {
         start_time: startTime, end_time: endTime,
         faculty_id: facultyId || null, skill_id: skillId || null,
         max_students: maxStudents, days_of_week: daysOfWeek,
+        status,
       })
       .eq('id', id)
       .select(`*, faculty:faculty_id(*), skill:skill_id(*), students:batch_students(students(*))`)
