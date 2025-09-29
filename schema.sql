@@ -178,3 +178,83 @@ CREATE INDEX idx_announcements_created_at ON public.announcements(created_at DES
 
 -- Grant all permissions to the service_role for the announcements table
 GRANT ALL ON TABLE public.announcements TO service_role;
+
+-- Drop the table if it exists to start fresh
+DROP TABLE IF EXISTS public.tickets;
+
+-- Create a type for ticket status to ensure data consistency
+DROP TYPE IF EXISTS public.ticket_status;
+CREATE TYPE public.ticket_status AS ENUM ('Open', 'In Progress', 'Resolved');
+
+-- Create a type for ticket priority
+DROP TYPE IF EXISTS public.ticket_priority;
+CREATE TYPE public.ticket_priority AS ENUM ('Low', 'Medium', 'High');
+
+
+-- Create the tickets table with correct foreign keys and new fields
+CREATE TABLE public.tickets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    
+    -- Aligned with frontend types
+    status public.ticket_status DEFAULT 'Open',
+    priority public.ticket_priority DEFAULT 'Low',
+    category TEXT, -- e.g., 'Fee', 'Placement', 'Certificate'
+    
+    -- Correctly references students as creators and users as assignees
+    student_id UUID REFERENCES public.students(id) ON DELETE SET NULL,
+    assignee_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+COMMENT ON TABLE public.tickets IS 'Stores support tickets submitted by students.';
+
+-- Create indexes for performance on frequently queried columns
+CREATE INDEX idx_tickets_status ON public.tickets(status);
+CREATE INDEX idx_tickets_student_id ON public.tickets(student_id);
+CREATE INDEX idx_tickets_assignee_id ON public.tickets(assignee_id);
+
+-- Grant permissions to the service role
+GRANT ALL ON TABLE public.tickets TO service_role;
+
+-- First, create a function that will be executed by the trigger.
+-- This function checks if the provided assignee_id belongs to an admin.
+CREATE OR REPLACE FUNCTION public.check_assignee_is_admin()
+RETURNS TRIGGER AS $$
+DECLARE
+  assignee_role public.user_role;
+BEGIN
+  -- If the assignee_id is not being set or is being set to NULL, allow the operation.
+  IF NEW.assignee_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  -- Query the users table to get the role of the user being assigned.
+  SELECT role INTO assignee_role
+  FROM public.users
+  WHERE id = NEW.assignee_id;
+
+  -- If the role is not 'admin', raise an exception to block the operation.
+  IF assignee_role IS DISTINCT FROM 'admin' THEN
+    RAISE EXCEPTION 'Assignee Error: User with ID % is not an admin.', NEW.assignee_id;
+  END IF;
+
+  -- If the check passes, allow the INSERT or UPDATE to proceed.
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Before creating a new trigger, drop any existing one to avoid errors on re-run.
+DROP TRIGGER IF EXISTS enforce_admin_assignee_on_tickets ON public.tickets;
+
+-- Now, create the trigger on the 'tickets' table.
+-- It will execute the function before any INSERT or UPDATE operation.
+CREATE TRIGGER enforce_admin_assignee_on_tickets
+BEFORE INSERT OR UPDATE ON public.tickets
+FOR EACH ROW
+EXECUTE FUNCTION public.check_assignee_is_admin();
+
+COMMENT ON TRIGGER enforce_admin_assignee_on_tickets ON public.tickets IS 'Ensures that only users with the admin role can be assigned to a ticket.';
