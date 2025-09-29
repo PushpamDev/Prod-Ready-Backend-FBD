@@ -17,12 +17,12 @@ router.get('/', auth, getAllTickets);
 // @route   POST /api/tickets
 // @desc    Create a new ticket
 // @access  Private
-router.post('/', auth, createTicket);
+router.post('/', createTicket);
 
 // @route   GET /api/tickets/:id
 // @desc    Get a single ticket by its ID
 // @access  Private
-router.get('/:id', auth, getTicketById);
+router.get('/:id', getTicketById);
 
 // @route   PATCH /api/tickets/:id
 // @desc    Update a ticket's status or assignee
