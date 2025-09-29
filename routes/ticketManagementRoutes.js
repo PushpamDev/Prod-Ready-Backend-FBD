@@ -12,7 +12,7 @@ const {
 // @route   GET /api/tickets
 // @desc    Get all tickets with filtering, searching, and pagination
 // @access  Private
-router.get('/', auth, getAllTickets);
+router.get('/', getAllTickets);
 
 // @route   POST /api/tickets
 // @desc    Create a new ticket
