@@ -55,7 +55,7 @@ const getMessages = async (req, res) => {
 
     if (error) {
       console.error('Error fetching messages:', error);
-      return res.status(500).json({ error: 'Failed to fetch messages' });
+      return res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
     }
 
     const messages = data.map(msg => {
