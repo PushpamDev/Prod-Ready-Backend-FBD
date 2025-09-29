@@ -13,6 +13,7 @@ const suggestionRoutes = require("./routes/suggestion");
 const attendanceRoutes = require('./routes/attendanceRoutes');
 const viewBatchRoutes = require("./routes/viewBatch");
 const announcementRoutes = require("./routes/announcements");
+const ticketRoutes = require("./routes/ticketManagementRoutes"); // Added ticket routes
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -34,6 +35,7 @@ app.use("/api/students", studentRoutes);
 app.use("/api/suggestions", suggestionRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use("/api/announcements",announcementRoutes);
+app.use("/api/tickets", ticketRoutes); // Used ticket routes
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);

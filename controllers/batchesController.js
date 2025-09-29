@@ -55,7 +55,7 @@ const getAllBatches = async (req, res) => {
 const createBatch = async (req, res) => {
   const {
     name, description, startDate, endDate, startTime, endTime,
-    facultyId, skillId, maxStudents, studentIds, daysOfWeek,
+    facultyId, skillId, maxStudents, studentIds, daysOfWeek, status
   } = req.body;
 
   if (!name) {
