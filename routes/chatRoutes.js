@@ -12,6 +12,6 @@ router.post('/:ticketId', sendMessage);
 // @route   GET /api/chat/:ticketId
 // @desc    Get all messages for a specific ticket
 // @access  Private
-router.get('/:ticketId', auth, getMessages);
+router.get('/:ticketId', getMessages);
 
 module.exports = router;
