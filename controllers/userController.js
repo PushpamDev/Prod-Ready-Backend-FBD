@@ -105,6 +105,27 @@ const getAllUsers = async (req, res) => {
   res.status(200).json(data);
 };
 
+// NEW: A dedicated function to get only admin users for the assignee dropdown
+const getAdmins = async (req, res) => {
+  try {
+    const { data: admins, error } = await supabase
+      .from('users')
+      .select('id, username') // Select only the fields needed
+      .eq('role', 'admin');   // Filter by role
+
+    if (error) {
+      console.error("Error fetching admins:", error);
+      return res.status(500).json({ error: "Failed to fetch admins" });
+    }
+
+    res.status(200).json(admins);
+  } catch (error) {
+    console.error("Internal server error while fetching admins:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+
 const assignRole = async (req, res) => {
   const { userId, role } = req.body;
 
@@ -146,4 +167,5 @@ module.exports = {
   login,
   getAllUsers,
   assignRole,
+  getAdmins, // EXPORTED: New function
 };

@@ -4,20 +4,16 @@ const { logActivity } = require("./logActivity");
 // Centralized error handler
 const handleSupabaseError = (res, error, context) => {
   console.error(`Error ${context}:`, error);
-  // Handle specific Supabase/PostgREST errors
-  if (error.code === 'PGRST116') { // "Not a single row was returned"
+  if (error.code === 'PGRST116') {
     return res.status(404).json({ error: "Ticket not found" });
   }
-  // Custom error from our trigger
   if (error.message.includes('Assignee Error')) {
     return res.status(400).json({ error: error.message });
   }
   return res.status(500).json({ error: `Failed to ${context.toLowerCase()}` });
 };
 
-// This function is for a STUDENT creating a ticket.
 const createTicket = async (req, res) => {
-  // ALIGNED: Now accepts priority and category from the request body.
   const { title, description, student_id, priority, category } = req.body;
 
   if (!title || !description || !student_id) {
@@ -31,8 +27,8 @@ const createTicket = async (req, res) => {
         title, 
         description, 
         student_id,
-        priority: priority || 'Low', // Default to 'Low' if not provided
-        category: category || 'General', // Default category
+        priority: priority || 'Low',
+        category: category || 'Other',
         status: 'Open' 
       }])
       .select()
@@ -51,12 +47,11 @@ const createTicket = async (req, res) => {
 
 const getAllTickets = async (req, res) => {
   try {
-    const { status, search, page = 1, limit = 15 } = req.query; // ALIGNED: Default limit to 15
+    const { status, search, category, page = 1, limit = 15 } = req.query;
     const offset = (page - 1) * limit;
 
     let query = supabase
       .from('tickets')
-      // ALIGNED: Selects all necessary fields and nested objects for the frontend
       .select(`
         id, title, description, status, priority, category, created_at, updated_at,
         student:students(id, name),
@@ -66,6 +61,10 @@ const getAllTickets = async (req, res) => {
 
     if (status && status !== 'All') {
       query = query.eq('status', status);
+    }
+    
+    if (category && category !== 'All') {
+      query = query.eq('category', category);
     }
 
     if (search) {
@@ -94,9 +93,7 @@ const getAllTickets = async (req, res) => {
 
 const getTicketById = async (req, res) => {
   const { id } = req.params;
-
   try {
-    // ALIGNED: Selects all fields to hydrate the details view
     const { data: ticket, error } = await supabase
       .from('tickets')
       .select(`
@@ -107,9 +104,7 @@ const getTicketById = async (req, res) => {
       `)
       .eq('id', id)
       .single();
-
     if (error) return handleSupabaseError(res, error, `fetching ticket ${id}`);
-    
     res.status(200).json(ticket);
   } catch (error) {
      console.error(`Internal server error while getting ticket ${id}:`, error);
@@ -121,22 +116,46 @@ const updateTicket = async (req, res) => {
   const { id } = req.params;
   const { assignee_id, status } = req.body;
 
-  // IMPROVEMENT: Dynamically build the payload for a true PATCH operation
   const updatePayload = {};
-  if (assignee_id !== undefined) {
-    updatePayload.assignee_id = assignee_id;
-  }
+
+  // MODIFIED LOGIC: Allow status changes, but only to 'Resolved'.
   if (status) {
+    if (status !== 'Resolved') {
+      return res.status(403).json({ 
+        error: "Forbidden: Only 'Resolved' status can be set manually. Status changes to 'In Progress' are automatic." 
+      });
+    }
     updatePayload.status = status;
   }
   
-  if (Object.keys(updatePayload).length === 0) {
-    return res.status(400).json({ error: "No fields to update provided." });
+  if (assignee_id !== undefined) {
+    updatePayload.assignee_id = assignee_id;
   }
   
-  updatePayload.updated_at = new Date();
-
+  if (Object.keys(updatePayload).length === 0) {
+    return res.status(400).json({ error: "No valid fields to update were provided." });
+  }
+  
   try {
+    // This is the "pushpam" rule for re-assignment. It remains unchanged.
+    if ('assignee_id' in updatePayload) {
+      const { data: currentUser, error: userError } = await supabase
+        .from('users').select('username').eq('id', req.user.id).single();
+      if (userError) throw userError;
+
+      const { data: currentTicket, error: ticketError } = await supabase
+        .from('tickets').select('assignee_id').eq('id', id).single();
+      if (ticketError) throw ticketError;
+
+      if (currentTicket.assignee_id && currentUser.username !== 'pushpam') {
+        return res.status(403).json({ 
+          error: "Forbidden: This ticket is already assigned and can only be reassigned by the super-admin." 
+        });
+      }
+    }
+    
+    // Proceed with the update
+    updatePayload.updated_at = new Date();
     const { data: ticket, error } = await supabase
       .from('tickets')
       .update(updatePayload)
@@ -146,9 +165,13 @@ const updateTicket = async (req, res) => {
 
     if (error) return handleSupabaseError(res, error, `updating ticket ${id}`);
 
-    await logActivity("Updated", `Ticket "${ticket.title}" was updated.`, "system");
+    const logMessage = status === 'Resolved' 
+      ? `Ticket "${ticket.title}" was marked as Resolved.`
+      : `Ticket "${ticket.title}" assignment was updated.`;
+    await logActivity("Updated", logMessage, req.user.id);
 
     res.status(200).json(ticket);
+
   } catch (error) {
     console.error(`Internal server error while updating ticket ${id}:`, error);
     res.status(500).json({ error: "Internal server error" });
@@ -157,19 +180,10 @@ const updateTicket = async (req, res) => {
 
 const deleteTicket = async (req, res) => {
   const { id } = req.params;
-  
   try {
-    const { data: ticket, error } = await supabase
-      .from('tickets')
-      .delete()
-      .eq('id', id)
-      .select()
-      .single();
-
+    const { data: ticket, error } = await supabase.from('tickets').delete().eq('id', id).select().single();
     if (error) return handleSupabaseError(res, error, `deleting ticket ${id}`);
-
     await logActivity("Deleted", `Ticket "${ticket.title}" (ID: ${id}) was deleted.`, "system");
-
     res.status(204).send();
   } catch (error) {
     console.error(`Internal server error while deleting ticket ${id}:`, error);
@@ -177,22 +191,58 @@ const deleteTicket = async (req, res) => {
   }
 };
 
-// NEW: Function to get only admin users for the assignee dropdown
 const getAdmins = async (req, res) => {
   try {
-    const { data: admins, error } = await supabase
-      .from('users')
-      .select('id, username')
-      .eq('role', 'admin');
-
+    const { data: admins, error } = await supabase.from('users').select('id, username').eq('role', 'admin');
     if (error) return handleSupabaseError(res, error, 'fetching admins');
-
     res.status(200).json(admins);
   } catch (error) {
     console.error("Internal server error while fetching admins:", error);
     res.status(500).json({ error: "Internal server error" });
   }
-}
+};
+
+const getTicketCategories = async (req, res) => {
+  try {
+    const { data, error } = await supabase.rpc('get_unique_ticket_categories');
+    if (error) return handleSupabaseError(res, error, 'fetching ticket categories');
+    const categories = data.map(item => item.category);
+    res.status(200).json(categories);
+  } catch (error) {
+     console.error("Internal server error while fetching ticket categories:", error);
+     res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// NEW: Chat Controller Logic for posting messages and updating status
+const postChatMessage = async (req, res) => {
+    const { ticketId } = req.params;
+    const { message } = req.body;
+    const sender_user_id = req.user.id; // From auth middleware
+
+    if (!message) {
+        return res.status(400).json({ error: 'Message content cannot be empty.' });
+    }
+
+    try {
+        // RULE 2: Call the transactional database function to perform both actions
+        const { data: newMessage, error } = await supabase.rpc('send_admin_reply_and_update_status', {
+            p_ticket_id: ticketId,
+            p_sender_user_id: sender_user_id,
+            p_message: message
+        });
+
+        if (error) return handleSupabaseError(res, error, 'posting chat message');
+
+        await logActivity("Replied", `Admin replied to ticket ID ${ticketId}`, sender_user_id);
+        
+        res.status(201).json(newMessage);
+    } catch (error) {
+        console.error(`Internal server error while posting message to ticket ${ticketId}:`, error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
 
 module.exports = {
   createTicket,
@@ -200,5 +250,7 @@ module.exports = {
   getTicketById,
   updateTicket,
   deleteTicket,
-  getAdmins, // EXPORTED: New function
+  getAdmins,
+  getTicketCategories,
+  postChatMessage, // EXPORTED: New function
 };
