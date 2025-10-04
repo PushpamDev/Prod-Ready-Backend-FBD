@@ -1,16 +1,55 @@
 const supabase = require('../db');
 
+// --- CORRECTED FUNCTION ---
 const getAllStudents = async (req, res) => {
-  const { data, error, count } = await supabase
-    .from('students')
-    .select('*', { count: 'exact' });
+  try {
+    const allStudents = [];
+    const pageSize = 1000; // Supabase's default/max limit per request
+    let page = 0;
+    let moreDataAvailable = true;
+    let totalCount = 0;
 
-  if (error) {
+    while (moreDataAvailable) {
+      const from = page * pageSize;
+      const to = from + pageSize - 1;
+
+      // We only need to get the count on the first request (page === 0)
+      const shouldFetchCount = page === 0;
+
+      const { data, error, count } = await supabase
+        .from('students')
+        .select('*', { count: shouldFetchCount ? 'exact' : 'estimated' })
+        .range(from, to);
+
+      if (error) {
+        throw error;
+      }
+      
+      // If we got data, add it to our results array
+      if (data) {
+        allStudents.push(...data);
+      }
+      
+      // On the first loop, store the total count
+      if (shouldFetchCount && count !== null) {
+        totalCount = count;
+      }
+
+      // If the number of records returned is less than the page size,
+      // it means we've reached the last page.
+      if (!data || data.length < pageSize) {
+        moreDataAvailable = false;
+      }
+
+      page++;
+    }
+
+    // Send the complete list and the total count
+    res.status(200).json({ students: allStudents, count: totalCount });
+
+  } catch (error) {
     res.status(500).json({ error: error.message });
-    return;
   }
-
-  res.status(200).json({ students: data, count });
 };
 
 const createStudent = async (req, res) => {

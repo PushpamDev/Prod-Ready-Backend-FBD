@@ -15,7 +15,7 @@ const getAllFaculty = async (req, res) => {
       faculty_availability ( id, day_of_week, start_time, end_time )
     `);
 
-  if (error) {
+if (error){
     console.error("Error fetching faculty:", error);
     return res.status(500).json({ error: "Failed to fetch faculty" });
   }

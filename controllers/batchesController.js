@@ -21,23 +21,44 @@ const getDynamicStatus = (startDate, endDate) => {
 
 const getAllBatches = async (req, res) => {
   try {
-    const query = supabase
-      .from('batches')
-      .select(`
-        *,
-        faculty:faculty_id(*),
-        skill:skill_id(*),
-        students:batch_students(students(*))
-      `);
+    const allBatches = [];
+    const pageSize = 1000;
+    let page = 0;
+    let moreDataAvailable = true;
 
-    if (req.user && req.user.role === 'faculty') {
-      query.eq('faculty_id', req.user.faculty_id);
+    while (moreDataAvailable) {
+      const from = page * pageSize;
+      const to = from + pageSize - 1;
+
+      const query = supabase
+        .from('batches')
+        .select(`
+          *,
+          faculty:faculty_id(*),
+          skill:skill_id(*),
+          students:batch_students(students(*))
+        `)
+        .range(from, to)
+        .limit(5000, { foreignTable: 'batch_students.students' });
+
+      if (req.user && req.user.role === 'faculty') {
+        query.eq('faculty_id', req.user.faculty_id);
+      }
+
+      const { data, error } = await query;
+      if (error) throw error;
+      
+      if (data) {
+        allBatches.push(...data);
+      }
+
+      if (!data || data.length < pageSize) {
+        moreDataAvailable = false;
+      }
+      page++;
     }
 
-    const { data, error } = await query;
-    if (error) throw error;
-
-    const formattedData = data.map(batch => {
+    const formattedData = allBatches.map(batch => {
       const status = getDynamicStatus(batch.start_date, batch.end_date);
       return {
         ...batch,
@@ -53,6 +74,7 @@ const getAllBatches = async (req, res) => {
 };
 
 const createBatch = async (req, res) => {
+  // This function is already correct
   const {
     name, description, startDate, endDate, startTime, endTime,
     facultyId, skillId, maxStudents, studentIds, daysOfWeek, status
@@ -63,7 +85,7 @@ const createBatch = async (req, res) => {
   }
 
   try {
-    // --- RESTORED: Faculty availability check logic ---
+    // --- Faculty availability check logic ---
     const { data: facultyAvailability, error: availabilityError } = await supabase
       .from('faculty_availability')
       .select('day_of_week, start_time, end_time')
@@ -88,12 +110,11 @@ const createBatch = async (req, res) => {
       }
     }
 
-    // --- RESTORED: Scheduling conflict check logic ---
+    // --- Scheduling conflict check logic ---
     const { data: existingBatches, error: existingBatchesError } = await supabase
       .from('batches')
       .select('name, start_time, end_time, days_of_week, start_date, end_date')
       .eq('faculty_id', facultyId);
-      // Removed .neq('status', 'Completed') to rely on dates instead
 
     if (existingBatchesError) throw existingBatchesError;
 
@@ -132,7 +153,6 @@ const createBatch = async (req, res) => {
       if (batchStudentError) throw batchStudentError;
     }
 
-    // --- FINAL SELECT (Corrected) ---
     const { data: finalBatch, error: finalBatchError } = await supabase
       .from('batches')
       .select(`*, faculty:faculty_id(*), skill:skill_id(*), students:batch_students(students(*))`)
@@ -146,7 +166,6 @@ const createBatch = async (req, res) => {
     res.status(201).json(formattedBatch);
 
   } catch (error) {
-    // --- RESTORED: Detailed error handling ---
     if (error.code === '23505' && error.message.includes('batches_name_key')) {
       return res.status(409).json({ error: `A batch with the name '${name}' already exists.` });
     }
@@ -159,17 +178,66 @@ const createBatch = async (req, res) => {
   }
 };
 
+// --- CORRECTED FUNCTION ---
 const updateBatch = async (req, res) => {
-  const { id } = req.params;
+  const { id } = req.params; // ID of the batch being updated
   const {
     name, description, startDate, endDate, startTime, endTime,
     facultyId, skillId, maxStudents, studentIds, daysOfWeek,
   } = req.body;
 
   try {
+    // --- ADDED: Faculty availability check (copied from createBatch) ---
+    const { data: facultyAvailability, error: availabilityError } = await supabase
+      .from('faculty_availability')
+      .select('day_of_week, start_time, end_time')
+      .eq('faculty_id', facultyId);
+
+    if (availabilityError) throw availabilityError;
+    
+    const newStartTime = new Date(`1970-01-01T${startTime}Z`);
+    const newEndTime = new Date(`1970-01-01T${endTime}Z`);
+
+    for (const day of daysOfWeek) {
+      const availabilityForDay = facultyAvailability.find(a => a.day_of_week.toLowerCase() === day.toLowerCase());
+      if (!availabilityForDay) {
+        return res.status(400).json({ error: `Faculty is not available on ${day}.` });
+      }
+      const facultyStartTime = new Date(`1970-01-01T${availabilityForDay.start_time}Z`);
+      const facultyEndTime = new Date(`1970-01-01T${availabilityForDay.end_time}Z`);
+      if (newStartTime < facultyStartTime || newEndTime > facultyEndTime) {
+        return res.status(400).json({ error: `Batch time on ${day} is outside of faculty's available hours.` });
+      }
+    }
+
+    // --- ADDED: Scheduling conflict check (copied from createBatch and modified) ---
+    const { data: existingBatches, error: existingBatchesError } = await supabase
+      .from('batches')
+      .select('id, name, start_time, end_time, days_of_week, start_date, end_date')
+      .eq('faculty_id', facultyId)
+      .neq('id', id); // <-- CRITICAL: Exclude the current batch from the check
+
+    if (existingBatchesError) throw existingBatchesError;
+
+    const newStartDate = new Date(startDate);
+    const newEndDate = new Date(endDate);
+
+    for (const batch of existingBatches) {
+      const existingStartTime = new Date(`1970-01-01T${batch.start_time}Z`);
+      const existingEndTime = new Date(`1970-01-01T${batch.end_time}Z`);
+      const existingStartDate = new Date(batch.start_date);
+      const existingEndDate = new Date(batch.end_date);
+      const daysOverlap = daysOfWeek.some(day => batch.days_of_week.map(d => d.toLowerCase()).includes(day.toLowerCase()));
+      const datesOverlap = newStartDate <= existingEndDate && newEndDate >= existingStartDate;
+
+      if (daysOverlap && datesOverlap && newStartTime < existingEndTime && newEndTime > existingStartTime) {
+        return res.status(409).json({ error: `Faculty has a scheduling conflict with other batch: ${batch.name}.` });
+      }
+    }
+    
+    // --- Original update logic now follows the validation ---
     const status = getDynamicStatus(startDate, endDate);
 
-    // This \"delete and replace\" strategy for students is effective and remains.
     const { error: deleteError } = await supabase.from('batch_students').delete().eq('batch_id', id);
     if (deleteError) throw deleteError;
 
@@ -201,9 +269,19 @@ const updateBatch = async (req, res) => {
     await logActivity('updated', `batch ${formattedBatch.name}`, 'Admin');
     res.json(formattedBatch);
   } catch (error) {
+     // --- ADDED: Detailed error handling (copied from createBatch) ---
+    if (error.code === '23505' && error.message.includes('batches_name_key')) {
+      return res.status(409).json({ error: `A batch with the name '${name}' already exists.` });
+    }
+     if (error.code === '23503') {
+      if (error.message.includes('batches_faculty_id_fkey')) return res.status(400).json({ error: `Faculty with ID ${facultyId} does not exist.` });
+      if (error.message.includes('batches_skill_id_fkey')) return res.status(400).json({ error: `Skill with ID ${skillId} does not exist.` });
+      if (error.message.includes('batch_students_student_id_fkey')) return res.status(400).json({ error: 'One or more student IDs are invalid.' });
+    }
     res.status(500).json({ error: error.message });
   }
 };
+
 
 const deleteBatch = async (req, res) => {
   const { id } = req.params;
@@ -220,13 +298,34 @@ const deleteBatch = async (req, res) => {
 const getBatchStudents = async (req, res) => {
   const { id } = req.params;
   try {
-    const { data, error } = await supabase
-      .from('batch_students')
-      .select('students ( id, name, admission_number, phone_number, remarks )')
-      .eq('batch_id', id);
+    const allStudentLinks = [];
+    const pageSize = 1000;
+    let page = 0;
+    let moreDataAvailable = true;
 
-    if (error) throw error;
-    const students = data.map(item => item.students).filter(Boolean);
+    while (moreDataAvailable) {
+      const from = page * pageSize;
+      const to = from + pageSize - 1;
+
+      const { data, error } = await supabase
+        .from('batch_students')
+        .select('students ( id, name, admission_number, phone_number, remarks )')
+        .eq('batch_id', id)
+        .range(from, to);
+
+      if (error) throw error;
+
+      if (data) {
+        allStudentLinks.push(...data);
+      }
+      
+      if (!data || data.length < pageSize) {
+        moreDataAvailable = false;
+      }
+      page++;
+    }
+
+    const students = allStudentLinks.map(item => item.students).filter(Boolean);
     res.json(students);
   } catch (error) {
     res.status(500).json({ error: error.message });
