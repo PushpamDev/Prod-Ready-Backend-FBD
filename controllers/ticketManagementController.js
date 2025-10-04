@@ -13,6 +13,8 @@ const handleSupabaseError = (res, error, context) => {
   return res.status(500).json({ error: `Failed to ${context.toLowerCase()}` });
 };
 
+// --- REVERTED TO ORIGINAL ---
+// This function no longer uses req.user, as requested.
 const createTicket = async (req, res) => {
   const { title, description, student_id, priority, category } = req.body;
 
@@ -45,6 +47,8 @@ const createTicket = async (req, res) => {
   }
 };
 
+// --- NO CHANGES NEEDED ---
+// This function already has excellent pagination.
 const getAllTickets = async (req, res) => {
   try {
     const { status, search, category, page = 1, limit = 15 } = req.query;
@@ -118,7 +122,6 @@ const updateTicket = async (req, res) => {
 
   const updatePayload = {};
 
-  // MODIFIED LOGIC: Allow status changes, but only to 'Resolved'.
   if (status) {
     if (status !== 'Resolved') {
       return res.status(403).json({ 
@@ -137,7 +140,6 @@ const updateTicket = async (req, res) => {
   }
   
   try {
-    // This is the "pushpam" rule for re-assignment. It remains unchanged.
     if ('assignee_id' in updatePayload) {
       const { data: currentUser, error: userError } = await supabase
         .from('users').select('username').eq('id', req.user.id).single();
@@ -154,7 +156,6 @@ const updateTicket = async (req, res) => {
       }
     }
     
-    // Proceed with the update
     updatePayload.updated_at = new Date();
     const { data: ticket, error } = await supabase
       .from('tickets')
@@ -191,11 +192,39 @@ const deleteTicket = async (req, res) => {
   }
 };
 
+// --- CORRECTED FUNCTION ---
+// Added a pagination loop to ensure all admins are always fetched.
 const getAdmins = async (req, res) => {
   try {
-    const { data: admins, error } = await supabase.from('users').select('id, username').eq('role', 'admin');
-    if (error) return handleSupabaseError(res, error, 'fetching admins');
-    res.status(200).json(admins);
+    const allAdmins = [];
+    const pageSize = 1000;
+    let page = 0;
+    let moreDataAvailable = true;
+
+    while (moreDataAvailable) {
+      const from = page * pageSize;
+      const to = from + pageSize - 1;
+
+      const { data, error } = await supabase
+        .from('users')
+        .select('id, username')
+        .eq('role', 'admin')
+        .range(from, to);
+
+      if (error) return handleSupabaseError(res, error, 'fetching admins');
+      
+      if (data) {
+        allAdmins.push(...data);
+      }
+      
+      if (!data || data.length < pageSize) {
+        moreDataAvailable = false;
+      }
+      page++;
+    }
+    
+    res.status(200).json(allAdmins);
+
   } catch (error) {
     console.error("Internal server error while fetching admins:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -204,7 +233,10 @@ const getAdmins = async (req, res) => {
 
 const getTicketCategories = async (req, res) => {
   try {
-    const { data, error } = await supabase.rpc('get_unique_ticket_categories');
+    const { data, error } = await supabase
+      .rpc('get_unique_ticket_categories')
+      .limit(2000); // Added a generous limit as a safeguard for RPC calls.
+      
     if (error) return handleSupabaseError(res, error, 'fetching ticket categories');
     const categories = data.map(item => item.category);
     res.status(200).json(categories);
@@ -214,18 +246,16 @@ const getTicketCategories = async (req, res) => {
   }
 };
 
-// NEW: Chat Controller Logic for posting messages and updating status
 const postChatMessage = async (req, res) => {
     const { ticketId } = req.params;
     const { message } = req.body;
-    const sender_user_id = req.user.id; // From auth middleware
+    const sender_user_id = req.user.id; 
 
     if (!message) {
         return res.status(400).json({ error: 'Message content cannot be empty.' });
     }
 
     try {
-        // RULE 2: Call the transactional database function to perform both actions
         const { data: newMessage, error } = await supabase.rpc('send_admin_reply_and_update_status', {
             p_ticket_id: ticketId,
             p_sender_user_id: sender_user_id,
@@ -252,5 +282,5 @@ module.exports = {
   deleteTicket,
   getAdmins,
   getTicketCategories,
-  postChatMessage, // EXPORTED: New function
+  postChatMessage,
 };
