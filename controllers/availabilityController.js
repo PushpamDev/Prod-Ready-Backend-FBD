@@ -3,17 +3,33 @@ const supabase = require("../db.js");
 const getFacultyAvailability = async (req, res) => {
   const { facultyId } = req.params;
 
-  const { data, error } = await supabase
-    .from("faculty_availability")
-    .select("*")
-    .eq("faculty_id", facultyId);
+  try {
+    // Check if faculty exists to provide a clear 404
+    const { data: faculty, error: facultyError } = await supabase
+        .from('faculty')
+        .select('id')
+        .eq('id', facultyId)
+        .single();
 
-  if (error) {
-    console.error("Error fetching availability:", error);
-    return res.status(500).json({ error: "Failed to fetch availability" });
+    if (facultyError || !faculty) {
+        return res.status(404).json({ error: 'Faculty not found.' });
+    }
+
+    const { data, error } = await supabase
+      .from("faculty_availability")
+      .select("id, day_of_week, start_time, end_time")
+      .eq("faculty_id", facultyId);
+
+    if (error) {
+      console.error("Error fetching availability:", error);
+      return res.status(500).json({ error: "Server error: Failed to fetch availability." });
+    }
+
+    res.status(200).json(data);
+  } catch (error) {
+      console.error("An unexpected error occurred in getFacultyAvailability:", error);
+      return res.status(500).json({ error: "An unexpected server error occurred." });
   }
-
-  res.status(200).json(data);
 };
 
 const setFacultyAvailability = async (req, res) => {
@@ -22,25 +38,28 @@ const setFacultyAvailability = async (req, res) => {
   if (!facultyId || !availability || !Array.isArray(availability)) {
     return res
       .status(400)
-      .json({ error: "Faculty ID and availability array are required" });
+      .json({ error: "Faculty ID and availability array are required." });
   }
 
   try {
+    // --- Conflict Check ---
     const today = new Date();
     const thirtyDaysFromNow = new Date();
     thirtyDaysFromNow.setDate(today.getDate() + 30);
     const todayStr = today.toISOString().split('T')[0];
     const thirtyDaysFromNowStr = thirtyDaysFromNow.toISOString().split('T')[0];
 
-    // Get batches active in the next 30 days
     const { data: batches, error: batchesError } = await supabase
         .from('batches')
         .select('name, days_of_week, start_time, end_time')
         .eq('faculty_id', facultyId)
-        .lte('start_date', thirtyDaysFromNowStr) // Starts before end of window
-        .gte('end_date', todayStr); // Ends after start of window
+        .lte('start_date', thirtyDaysFromNowStr)
+        .gte('end_date', todayStr);
 
-    if (batchesError) throw batchesError;
+    if (batchesError) {
+        console.error("Error fetching batches for conflict check:", batchesError);
+        return res.status(500).json({ error: "Server error: Could not verify schedule conflicts." });
+    }
 
     if (batches && batches.length > 0) {
         for (const batch of batches) {
@@ -49,14 +68,12 @@ const setFacultyAvailability = async (req, res) => {
                     (a) => a.day_of_week.toLowerCase() === day.toLowerCase()
                 );
 
-                // Conflict 1: Day is removed
                 if (!newDayAvailability) {
                     return res.status(409).json({
                         error: `Update failed. The faculty has batch "${batch.name}" on ${day}, but this day is not in the proposed new availability.`,
                     });
                 }
 
-                // Conflict 2: Time has changed and batch no longer fits
                 if (batch.start_time < newDayAvailability.start_time || batch.end_time > newDayAvailability.end_time) {
                     return res.status(409).json({
                         error: `Update failed. Batch "${batch.name}" (${batch.start_time}-${batch.end_time} on ${day}) conflicts with the new availability slot (${newDayAvailability.start_time}-${newDayAvailability.end_time}).`,
@@ -65,17 +82,18 @@ const setFacultyAvailability = async (req, res) => {
             }
         }
     }
-    // 1. Delete all existing availability for this faculty
+
+    // --- Update Availability ---
     const { error: deleteError } = await supabase
       .from("faculty_availability")
       .delete()
       .eq("faculty_id", facultyId);
 
     if (deleteError) {
-        throw deleteError
+      console.error("Error clearing previous availability:", deleteError);
+      return res.status(500).json({ error: "Failed to update availability: Could not clear the previous schedule." });
     }
 
-    // 2. Insert the new availability slots, if any
     if (availability.length > 0) {
       const availabilityData = availability.map((slot) => ({
         faculty_id: facultyId,
@@ -90,17 +108,21 @@ const setFacultyAvailability = async (req, res) => {
         .select();
 
       if (insertError) {
-        throw insertError
+        console.error("Error inserting new availability:", insertError);
+        let message = "Failed to save new availability. The faculty's schedule is now empty and must be set again.";
+        if (insertError.code === '23503') {
+            message = "Failed to save new availability due to invalid data. The faculty ID may not exist.";
+        }
+        return res.status(500).json({ error: message });
       }
 
       return res.status(201).json(data);
     }
 
-    // If availability array is empty, we've just cleared it.
-    res.status(200).json([]);
+    res.status(200).json({ message: "Faculty availability has been successfully cleared." });
   } catch (error) {
-    console.error("Error setting availability:", error);
-    return res.status(500).json({ error: "Failed to set availability" });
+    console.error("An unexpected error occurred in setFacultyAvailability:", error);
+    return res.status(500).json({ error: "An unexpected server error occurred." });
   }
 };
 
