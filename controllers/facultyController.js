@@ -1,6 +1,21 @@
 const supabase = require("../db.js");
 const { logActivity } = require("./logActivity");
 
+// Helper function to determine batch status
+function getDynamicStatus(startDate, endDate) {
+  const now = new Date();
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  if (now < start) {
+    return "Upcoming";
+  } else if (now >= start && now <= end) {
+    return "Active";
+  } else {
+    return "Completed";
+  }
+}
+
 const getAllFaculty = async (req, res) => {
   const { data, error } = await supabase
     .from("faculty")
@@ -270,4 +285,82 @@ const deleteFaculty = async (req, res) => {
   }
 };
 
-module.exports = { getAllFaculty, createFaculty, updateFaculty, deleteFaculty };
+const getFacultyActiveStudents = async (req, res) => {
+  try {
+    const { data: faculties, error: facultyError } = await supabase
+      .from("faculty")
+      .select("id, name");
+
+    if (facultyError) throw facultyError;
+
+    const { data: batches, error: batchesError } = await supabase
+      .from("batches")
+      .select("id, faculty_id, start_date, end_date");
+
+    if (batchesError) throw batchesError;
+
+    const activeBatches = batches.filter(
+      (batch) => getDynamicStatus(batch.start_date, batch.end_date) === "Active"
+    );
+
+    const activeBatchIds = activeBatches.map((b) => b.id);
+
+    if (activeBatchIds.length === 0) {
+      const facultyData = faculties.map((faculty) => ({
+        faculty_id: faculty.id,
+        faculty_name: faculty.name,
+        active_students: 0,
+      }));
+      return res.status(200).json(facultyData);
+    }
+
+    const { data: studentLinks, error: studentLinksError } = await supabase
+      .from("batch_students")
+      .select("batch_id, student_id")
+      .in("batch_id", activeBatchIds);
+
+    if (studentLinksError) throw studentLinksError;
+
+    const studentsPerBatch = activeBatches.reduce((acc, batch) => {
+      const uniqueStudents = new Set(
+        studentLinks
+          .filter((link) => link.batch_id === batch.id)
+          .map((link) => link.student_id)
+      );
+      acc[batch.id] = {
+        faculty_id: batch.faculty_id,
+        student_count: uniqueStudents.size,
+      };
+      return acc;
+    }, {});
+
+    const facultyActiveStudents = faculties.map((faculty) => {
+      const count = Object.values(studentsPerBatch).reduce(
+        (total, batch) => {
+          if (batch.faculty_id === faculty.id) {
+            return total + batch.student_count;
+          }
+          return total;
+        },
+        0
+      );
+      return {
+        faculty_id: faculty.id,
+        faculty_name: faculty.name,
+        active_students: count,
+      };
+    });
+
+    res.status(200).json(facultyActiveStudents);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+module.exports = {
+  getAllFaculty,
+  createFaculty,
+  updateFaculty,
+  deleteFaculty,
+  getFacultyActiveStudents,
+};

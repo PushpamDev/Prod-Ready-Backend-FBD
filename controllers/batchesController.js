@@ -332,4 +332,45 @@ const getBatchStudents = async (req, res) => {
   }
 };
 
-module.exports = { getAllBatches, createBatch, updateBatch, deleteBatch, getBatchStudents };
+const getActiveStudentsCount = async (req, res) => {
+  try {
+    const { data: batches, error: batchesError } = await supabase
+      .from("batches")
+      .select("id, start_date, end_date");
+
+    if (batchesError) throw batchesError;
+
+    const activeBatches = batches.filter(
+      (batch) => getDynamicStatus(batch.start_date, batch.end_date).toLowerCase() === "active"
+    );
+
+    if (activeBatches.length === 0) {
+      return res.status(200).json({ total_active_students: 0 });
+    }
+
+    const activeBatchIds = activeBatches.map((b) => b.id);
+
+    const { data: studentLinks, error: studentLinksError } = await supabase
+      .from("batch_students")
+      .select("student_id")
+      .in("batch_id", activeBatchIds);
+
+    if (studentLinksError) throw studentLinksError;
+
+    const uniqueStudentIds = new Set(studentLinks.map((link) => link.student_id));
+    const totalActiveStudents = uniqueStudentIds.size;
+
+    res.status(200).json({ total_active_students: totalActiveStudents });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+module.exports = {
+  getAllBatches,
+  createBatch,
+  updateBatch,
+  deleteBatch,
+  getBatchStudents,
+  getActiveStudentsCount,
+};
