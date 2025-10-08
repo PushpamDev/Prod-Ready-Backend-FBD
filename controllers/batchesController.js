@@ -180,14 +180,14 @@ const createBatch = async (req, res) => {
 
 // --- CORRECTED FUNCTION ---
 const updateBatch = async (req, res) => {
-  const { id } = req.params; // ID of the batch being updated
+  const { id } = req.params; // The ID of the batch being updated
   const {
     name, description, startDate, endDate, startTime, endTime,
     facultyId, skillId, maxStudents, studentIds, daysOfWeek,
   } = req.body;
 
   try {
-    // --- ADDED: Faculty availability check (copied from createBatch) ---
+    // --- 1. ADDED: Faculty availability check (same as in createBatch) ---
     const { data: facultyAvailability, error: availabilityError } = await supabase
       .from('faculty_availability')
       .select('day_of_week, start_time, end_time')
@@ -210,12 +210,12 @@ const updateBatch = async (req, res) => {
       }
     }
 
-    // --- ADDED: Scheduling conflict check (copied from createBatch and modified) ---
+    // --- 2. FIXED: Scheduling conflict check ---
     const { data: existingBatches, error: existingBatchesError } = await supabase
       .from('batches')
       .select('id, name, start_time, end_time, days_of_week, start_date, end_date')
       .eq('faculty_id', facultyId)
-      .neq('id', id); // <-- CRITICAL: Exclude the current batch from the check
+      .neq('id', id); // <-- THE CRITICAL FIX: Exclude the current batch
 
     if (existingBatchesError) throw existingBatchesError;
 
@@ -235,12 +235,14 @@ const updateBatch = async (req, res) => {
       }
     }
     
-    // --- Original update logic now follows the validation ---
+    // --- Original update logic now follows after successful validation ---
     const status = getDynamicStatus(startDate, endDate);
 
+    // First, remove all existing student associations for this batch
     const { error: deleteError } = await supabase.from('batch_students').delete().eq('batch_id', id);
     if (deleteError) throw deleteError;
 
+    // Then, add the new list of students
     if (studentIds && studentIds.length > 0) {
       const batchStudentData = studentIds.filter(Boolean).map((studentId) => ({ batch_id: id, student_id: studentId }));
       if (batchStudentData.length > 0) {
@@ -249,6 +251,7 @@ const updateBatch = async (req, res) => {
       }
     }
 
+    // Finally, update the batch details
     const { data, error } = await supabase
       .from('batches')
       .update({
@@ -269,7 +272,7 @@ const updateBatch = async (req, res) => {
     await logActivity('updated', `batch ${formattedBatch.name}`, 'Admin');
     res.json(formattedBatch);
   } catch (error) {
-     // --- ADDED: Detailed error handling (copied from createBatch) ---
+     // --- 3. ADDED: Robust error handling (same as in createBatch) ---
     if (error.code === '23505' && error.message.includes('batches_name_key')) {
       return res.status(409).json({ error: `A batch with the name '${name}' already exists.` });
     }
