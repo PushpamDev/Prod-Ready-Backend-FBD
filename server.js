@@ -18,6 +18,7 @@ const viewBatchRoutes = require("./routes/viewBatch");
 const announcementRoutes = require("./routes/announcements");
 const ticketRoutes = require("./routes/ticketManagementRoutes");
 const chatRoutes = require("./routes/chatRoutes");
+const courseRoutes = require("./routes/courseRoutes");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -41,6 +42,7 @@ app.use('/api/attendance', attendanceRoutes);
 app.use("/api/announcements", announcementRoutes);
 app.use("/api/tickets", ticketRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/courses", courseRoutes);
 
 // --- 2. SERVE STATIC FRONTEND FILES (for Production) ---
 

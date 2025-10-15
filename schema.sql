@@ -258,3 +258,393 @@ FOR EACH ROW
 EXECUTE FUNCTION public.check_assignee_is_admin();
 
 COMMENT ON TRIGGER enforce_admin_assignee_on_tickets ON public.tickets IS 'Ensures that only users with the admin role can be assigned to a ticket.';
+
+CREATE TABLE public.messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ticket_id UUID REFERENCES public.tickets(id) ON DELETE CASCADE,
+  sender_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+  sender_student_id UUID REFERENCES public.students(id) ON DELETE SET NULL,
+  message TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT chk_one_sender CHECK (
+    (sender_user_id IS NOT NULL AND sender_student_id IS NULL) OR
+    (sender_user_id IS NULL AND sender_student_id IS NOT NULL)
+  )
+);
+
+COMMENT ON TABLE public.messages IS 'Stores chat messages related to a ticket.';
+GRANT SELECT ON TABLE messages TO service_role;
+GRANT SELECT ON TABLE messages TO authenticated;
+GRANT INSERT ON TABLE messages TO service_role;
+GRANT INSERT ON TABLE messages TO authenticated;
+GRANT INSERT ON TABLE activities TO service_role;
+GRANT INSERT ON TABLE activities TO authenticated;
+CREATE OR REPLACE FUNCTION get_unique_ticket_categories()
+RETURNS TABLE(category TEXT) AS $$
+BEGIN
+  RETURN QUERY 
+  SELECT DISTINCT t.category 
+  FROM tickets as t
+  WHERE t.category IS NOT NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE FUNCTION send_admin_reply_and_update_status(
+  p_ticket_id UUID,
+  p_sender_user_id UUID,
+  p_message TEXT
+)
+RETURNS JSON AS $$
+DECLARE
+  new_message RECORD;
+BEGIN
+  -- Insert the new chat message
+  INSERT INTO chat_messages (ticket_id, sender_user_id, message)
+  VALUES (p_ticket_id, p_sender_user_id, p_message)
+  RETURNING * INTO new_message;
+
+  -- Check the ticket's current status and update it if it's 'Open'
+  UPDATE tickets
+  SET status = 'In Progress'
+  WHERE id = p_ticket_id AND status = 'Open';
+
+  -- Return the newly created message
+  RETURN row_to_json(new_message);
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE FUNCTION send_admin_reply_and_update_status(
+  p_ticket_id UUID,
+  p_sender_user_id UUID,
+  p_message TEXT
+)
+RETURNS JSON AS $$
+DECLARE
+  new_message RECORD;
+BEGIN
+  -- Insert the new chat message into the 'messages' table
+  INSERT INTO messages (ticket_id, sender_user_id, message)
+  VALUES (p_ticket_id, p_sender_user_id, p_message)
+  RETURNING * INTO new_message;
+
+  -- Check the ticket's current status and update it if it's 'Open'
+  UPDATE tickets
+  SET status = 'In Progress'
+  WHERE id = p_ticket_id AND status = 'Open';
+
+  -- Return the newly created message as JSON
+  RETURN row_to_json(new_message);
+END;
+$$ LANGUAGE plpgsql;  
+-- Run this in your Supabase SQL Editor to fix the function signature.
+
+-- The only change is swapping the order of the parameters to match
+-- the alphabetical order used by the Supabase client library.
+CREATE OR REPLACE FUNCTION update_faculty_availability(
+    p_availability JSONB, -- Swapped to be the first parameter
+    p_faculty_id UUID     -- Swapped to be the second parameter
+)
+RETURNS VOID AS $$
+BEGIN
+    -- This logic remains the same.
+    -- Delete existing availability for the faculty
+    DELETE FROM public.faculty_availability WHERE faculty_id = p_faculty_id;
+
+    -- Insert new availability if the array is not empty
+    IF jsonb_array_length(p_availability) > 0 THEN
+        INSERT INTO public.faculty_availability (faculty_id, day_of_week, start_time, end_time)
+        SELECT
+            p_faculty_id,
+            (value->>'day_of_week')::text,
+            (value->>'start_time')::time,
+            (value->>'end_time')::time
+        FROM jsonb_array_elements(p_availability) AS value;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+-- Certificates Table
+CREATE TABLE public.certificates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    cost NUMERIC(10, 2) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.certificates IS 'Stores information about available certificates and their costs.';
+
+-- Courses Table
+CREATE TABLE public.courses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    price NUMERIC(10, 2) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.courses IS 'Stores information about available courses and their prices.';
+
+-- Admissions Table
+CREATE TABLE public.admissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    student_name TEXT NOT NULL,
+    student_phone_number TEXT NOT NULL,
+    father_name TEXT NOT NULL,
+    father_phone_number TEXT,
+    permanent_address TEXT NOT NULL,
+    current_address TEXT,
+    address_proof_id_number TEXT NOT NULL,
+    certificate_id UUID REFERENCES public.certificates(id),
+    total_fees NUMERIC(10, 2) NOT NULL,
+    discount NUMERIC(10, 2) DEFAULT 0,
+    final_fees NUMERIC(10, 2) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.admissions IS 'Stores detailed information for each student admission.';
+
+-- Admission Courses Junction Table
+CREATE TABLE public.admission_courses (
+    admission_id UUID NOT NULL REFERENCES public.admissions(id) ON DELETE CASCADE,
+    course_id UUID NOT NULL REFERENCES public.courses(id) ON DELETE CASCADE,
+    PRIMARY KEY (admission_id, course_id)
+);
+COMMENT ON TABLE public.admission_courses IS 'Maps admissions to the courses selected by the student.';
+
+-- Fee Installments Table
+CREATE TABLE public.fee_installments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    admission_id UUID NOT NULL REFERENCES public.admissions(id) ON DELETE CASCADE,
+    installment_date DATE NOT NULL,
+    amount NUMERIC(10, 2) NOT NULL,
+    is_paid BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.fee_installments IS 'Stores the payment schedule for each admission.';
+
+-- Follow-ups Table
+CREATE TABLE public.follow_ups (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    admission_id UUID NOT NULL REFERENCES public.admissions(id) ON DELETE CASCADE,
+    follow_up_date DATE NOT NULL,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.follow_ups IS 'Tracks follow-up communications with students regarding fee payments.';
+
+-- Receipts Table
+CREATE TABLE public.receipts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    admission_id UUID NOT NULL REFERENCES public.admissions(id) ON DELETE CASCADE,
+    receipt_number TEXT NOT NULL UNIQUE,
+    amount_paid NUMERIC(10, 2) NOT NULL,
+    payment_date DATE NOT NULL,
+    generated_by UUID REFERENCES public.users(id),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.receipts IS 'Stores information about receipts generated for student payments.';
+
+-- Add indexes for foreign keys to improve query performance
+CREATE INDEX idx_admissions_certificate_id ON public.admissions(certificate_id);
+CREATE INDEX idx_admission_courses_admission_id ON public.admission_courses(admission_id);
+CREATE INDEX idx_admission_courses_course_id ON public.admission_courses(course_id);
+CREATE INDEX idx_fee_installments_admission_id ON public.fee_installments(admission_id);
+CREATE INDEX idx_follow_ups_admission_id ON public.follow_ups(admission_id);
+CREATE INDEX idx_receipts_admission_id ON public.receipts(admission_id);
+CREATE INDEX idx_receipts_generated_by ON public.receipts(generated_by);
+
+-- Grant all permissions to the service_role for all new tables
+GRANT ALL ON TABLE public.certificates TO service_role;
+GRANT ALL ON TABLE public.courses TO service_role;
+GRANT ALL ON TABLE public.admissions TO service_role;
+GRANT ALL ON TABLE public.admission_courses TO service_role;
+GRANT ALL ON TABLE public.fee_installments TO service_role;
+GRANT ALL ON TABLE public.follow_ups TO service_role;
+GRANT ALL ON TABLE public.receipts TO service_role;
+
+-- =================================================================
+-- Clean Slate: Drop existing admission-related tables and functions
+-- =================================================================
+-- This section safely removes the old tables and their dependencies.
+DROP FUNCTION IF EXISTS public.create_admission_and_student(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, UUID, NUMERIC, NUMERIC, UUID[]);
+DROP TABLE IF EXISTS public.receipts CASCADE;
+DROP TABLE IF EXISTS public.follow_ups CASCADE;
+DROP TABLE IF EXISTS public.fee_installments CASCADE;
+DROP TABLE IF EXISTS public.admission_courses CASCADE;
+DROP TABLE IF EXISTS public.admissions CASCADE;
+DROP TABLE IF EXISTS public.courses CASCADE;
+DROP TABLE IF EXISTS public.certificates CASCADE;
+DROP TABLE IF EXISTS public.students CASCADE;
+
+
+-- =================================================================
+-- Recreate Tables with the Correct, Normalized Structure
+-- =================================================================
+
+-- Students Table: The single source of truth for student information.
+CREATE TABLE public.students (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    phone_number TEXT,
+    admission_number TEXT UNIQUE,
+    father_name TEXT,
+    father_phone_number TEXT,
+    permanent_address TEXT,
+    current_address TEXT,
+    address_proof_id_number TEXT,
+    remarks TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.students IS 'Stores core information about each student.';
+
+-- Certificates Table
+CREATE TABLE public.certificates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    cost NUMERIC(10, 2) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.certificates IS 'Stores information about available certificates and their costs.';
+
+-- Courses Table
+CREATE TABLE public.courses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    price NUMERIC(10, 2) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.courses IS 'Stores information about available courses and their prices.';
+
+-- Admissions Table: Links a student to their admission-specific details.
+CREATE TABLE public.admissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    student_id UUID NOT NULL REFERENCES public.students(id) ON DELETE CASCADE,
+    certificate_id UUID REFERENCES public.certificates(id),
+    total_fees NUMERIC(10, 2) NOT NULL,
+    discount NUMERIC(10, 2) DEFAULT 0,
+    final_fees NUMERIC(10, 2) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.admissions IS 'Stores admission-specific details, linked to a student.';
+
+-- Admission Courses Junction Table
+CREATE TABLE public.admission_courses (
+    admission_id UUID NOT NULL REFERENCES public.admissions(id) ON DELETE CASCADE,
+    course_id UUID NOT NULL REFERENCES public.courses(id) ON DELETE CASCADE,
+    PRIMARY KEY (admission_id, course_id)
+);
+COMMENT ON TABLE public.admission_courses IS 'Maps admissions to the courses selected by the student.';
+
+-- Fee Installments Table
+CREATE TABLE public.fee_installments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    admission_id UUID NOT NULL REFERENCES public.admissions(id) ON DELETE CASCADE,
+    installment_date DATE NOT NULL,
+    amount NUMERIC(10, 2) NOT NULL,
+    is_paid BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.fee_installments IS 'Stores the payment schedule for each admission.';
+
+-- Follow-ups Table
+CREATE TABLE public.follow_ups (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    admission_id UUID NOT NULL REFERENCES public.admissions(id) ON DELETE CASCADE,
+    follow_up_date DATE NOT NULL,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.follow_ups IS 'Tracks follow-up communications with students regarding fee payments.';
+
+-- Receipts Table
+CREATE TABLE public.receipts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    admission_id UUID NOT NULL REFERENCES public.admissions(id) ON DELETE CASCADE,
+    receipt_number TEXT NOT NULL UNIQUE,
+    amount_paid NUMERIC(10, 2) NOT NULL,
+    payment_date DATE NOT NULL,
+    generated_by UUID REFERENCES public.users(id),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+COMMENT ON TABLE public.receipts IS 'Stores information about receipts generated for student payments.';
+
+
+-- =================================================================
+-- Create Indexes and Grant Permissions
+-- =================================================================
+
+CREATE INDEX idx_admissions_student_id ON public.admissions(student_id);
+CREATE INDEX idx_admissions_certificate_id ON public.admissions(certificate_id);
+CREATE INDEX idx_admission_courses_admission_id ON public.admission_courses(admission_id);
+CREATE INDEX idx_admission_courses_course_id ON public.admission_courses(course_id);
+CREATE INDEX idx_fee_installments_admission_id ON public.fee_installments(admission_id);
+CREATE INDEX idx_follow_ups_admission_id ON public.follow_ups(admission_id);
+CREATE INDEX idx_receipts_admission_id ON public.receipts(admission_id);
+CREATE INDEX idx_receipts_generated_by ON public.receipts(generated_by);
+
+GRANT ALL ON TABLE public.students TO service_role;
+GRANT ALL ON TABLE public.certificates TO service_role;
+GRANT ALL ON TABLE public.courses TO service_role;
+GRANT ALL ON TABLE public.admissions TO service_role;
+GRANT ALL ON TABLE public.admission_courses TO service_role;
+GRANT ALL ON TABLE public.fee_installments TO service_role;
+GRANT ALL ON TABLE public.follow_ups TO service_role;
+GRANT ALL ON TABLE public.receipts TO service_role;
+
+
+-- =================================================================
+-- The All-in-One Admission Function
+-- =================================================================
+-- Your application will call this single function to create a new admission.
+
+CREATE OR REPLACE FUNCTION public.create_admission_and_student(
+    p_student_name TEXT,
+    p_student_phone_number TEXT,
+    p_father_name TEXT,
+    p_father_phone_number TEXT,
+    p_permanent_address TEXT,
+    p_current_address TEXT,
+    p_address_proof_id_number TEXT,
+    p_remarks TEXT,
+    p_certificate_id UUID,
+    p_total_fees NUMERIC,
+    p_discount NUMERIC,
+    p_courses UUID[]
+)
+RETURNS UUID AS $$
+DECLARE
+  new_student_id UUID;
+  new_admission_id UUID;
+  v_final_fees NUMERIC;
+  course_id UUID;
+BEGIN
+  -- Calculate final_fees
+  v_final_fees := p_total_fees - COALESCE(p_discount, 0);
+
+  -- 1. Insert the new student and get their ID
+  INSERT INTO public.students (
+      name, phone_number, father_name, father_phone_number, 
+      permanent_address, current_address, address_proof_id_number, 
+      remarks, admission_number
+  )
+  VALUES (
+    p_student_name, p_student_phone_number, p_father_name, p_father_phone_number,
+    p_permanent_address, p_current_address, p_address_proof_id_number,
+    p_remarks, gen_random_uuid()::text
+  ) RETURNING id INTO new_student_id;
+
+  -- 2. Insert the new admission record, linking it to the new student
+  INSERT INTO public.admissions (student_id, certificate_id, total_fees, discount, final_fees)
+  VALUES (new_student_id, p_certificate_id, p_total_fees, p_discount, v_final_fees)
+  RETURNING id INTO new_admission_id;
+
+  -- 3. Link the selected courses to the admission
+  IF p_courses IS NOT NULL THEN
+    FOREACH course_id IN ARRAY p_courses
+    LOOP
+      INSERT INTO public.admission_courses (admission_id, course_id)
+      VALUES (new_admission_id, course_id);
+    END LOOP;
+  END IF;
+
+  -- 4. Return the ID of the newly created admission
+  RETURN new_admission_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Grant permission for your application to execute the function
+GRANT EXECUTE ON FUNCTION public.create_admission_and_student(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, UUID, NUMERIC, NUMERIC, UUID[]) TO service_role;
+
