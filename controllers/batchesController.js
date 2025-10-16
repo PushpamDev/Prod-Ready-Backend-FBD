@@ -1,74 +1,76 @@
 const supabase = require('../db');
 const { logActivity } = require('./logActivity');
 
+// **FIX**: Standardized status to all lowercase to match frontend types
 const getDynamicStatus = (startDate, endDate) => {
   const now = new Date();
   const start = new Date(startDate);
   const end = new Date(endDate);
-
   now.setHours(0, 0, 0, 0);
   start.setHours(0, 0, 0, 0);
   end.setHours(0, 0, 0, 0);
-
-  if (now < start) {
-    return 'Upcoming';
-  } else if (now >= start && now <= end) {
-    return 'active';
-  } else {
-    return 'Completed';
-  }
+  if (now < start) return 'upcoming';
+  if (now >= start && now <= end) return 'active';
+  return 'completed';
 };
 
 const getAllBatches = async (req, res) => {
   try {
-    const allBatches = [];
-    const pageSize = 1000;
-    let page = 0;
-    let moreDataAvailable = true;
+    const today = new Date().toISOString().split('T')[0];
 
-    while (moreDataAvailable) {
-      const from = page * pageSize;
-      const to = from + pageSize - 1;
+    const [batchesResult, substitutionsResult, allFacultiesResult] = await Promise.all([
+      // **FIX**: Corrected the foreign key syntax for `faculty` back to the original working version.
+      supabase.from('batches').select(`
+        *,
+        faculty:faculty_id(*),
+        skill:skill_id(*),
+        students:batch_students(count)
+      `),
+      supabase.from('faculty_substitutions').select(`*, substitute:substitute_faculty_id(*)`).lte('start_date', today).gte('end_date', today),
+      supabase.from('faculty').select('*')
+    ]);
 
-      const query = supabase
-        .from('batches')
-        .select(`
-          *,
-          faculty:faculty_id(*),
-          skill:skill_id(*),
-          students:batch_students(students(*))
-        `)
-        .range(from, to)
-        .limit(5000, { foreignTable: 'batch_students.students' });
+    if (batchesResult.error) throw batchesResult.error;
+    if (substitutionsResult.error) throw substitutionsResult.error;
+    if (allFacultiesResult.error) throw allFacultiesResult.error;
 
-      if (req.user && req.user.role === 'faculty') {
-        query.eq('faculty_id', req.user.faculty_id);
-      }
-
-      const { data, error } = await query;
-      if (error) throw error;
-      
-      if (data) {
-        allBatches.push(...data);
-      }
-
-      if (!data || data.length < pageSize) {
-        moreDataAvailable = false;
-      }
-      page++;
-    }
+    const allBatches = batchesResult.data;
+    const activeSubstitutions = substitutionsResult.data;
+    const allFaculties = allFacultiesResult.data;
 
     const formattedData = allBatches.map(batch => {
-      const status = getDynamicStatus(batch.start_date, batch.end_date);
-      return {
+      const activeSub = activeSubstitutions.find(sub => sub.batch_id === batch.id);
+      
+      let finalBatch = {
         ...batch,
-        status,
-        students: batch.students.map(s => s.students).filter(Boolean)
+        status: getDynamicStatus(batch.start_date, batch.end_date),
+        // The student data is now an object with a count property, so we extract the number.
+        students: batch.students[0]?.count || 0,
+        isSubstituted: false,
       };
+
+      if (activeSub && activeSub.substitute) {
+        const originalFaculty = allFaculties.find(f => f.id === activeSub.original_faculty_id);
+        
+        finalBatch.isSubstituted = true;
+        finalBatch.faculty = activeSub.substitute;
+        finalBatch.faculty_id = activeSub.substitute_faculty_id;
+        finalBatch.original_faculty = originalFaculty ? { id: originalFaculty.id, name: originalFaculty.name } : null;
+        finalBatch.substitutionDetails = activeSub;
+      }
+
+      return finalBatch;
     });
+    
+    // Filter for faculty role after processing substitutions
+    if (req.user && req.user.role === 'faculty') {
+        const facultyBatches = formattedData.filter(batch => batch.faculty_id === req.user.faculty_id);
+        return res.json(facultyBatches);
+    }
 
     res.json(formattedData);
   } catch (error) {
+    console.error("Error in getAllBatches:", error);
     res.status(500).json({ error: error.message });
   }
 };

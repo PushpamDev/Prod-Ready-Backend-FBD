@@ -8,56 +8,59 @@ const getFreeSlots = async (req, res) => {
     }
 
     try {
-        // 1. Fetch all data
-        let facultyQuery = supabase
-            .from('faculty')
-            .select(`
-                id,
-                name,
-                skills ( id, name ),
-                availability:faculty_availability ( day_of_week, start_time, end_time )
-            `);
+        // --- Step 1: Fetch all relevant data in parallel ---
 
-        if (selectedFaculty) {
-            facultyQuery = facultyQuery.eq('id', selectedFaculty);
-        }
+        // Fetch faculties, optionally filtered by the selected faculty
+        let facultyQuery = supabase.from('faculty').select(`
+            id, name,
+            skills ( id, name ),
+            availability:faculty_availability ( day_of_week, start_time, end_time )
+        `);
+        if (selectedFaculty) facultyQuery = facultyQuery.eq('id', selectedFaculty);
 
-        const { data: faculties, error: facultiesError } = await facultyQuery;
+        const [
+            { data: faculties, error: facultiesError },
+            { data: batches, error: batchesError },
+            { data: substitutions, error: substitutionsError }
+        ] = await Promise.all([
+            facultyQuery,
+            // Fetch only batches that are active within the selected date range
+            supabase.from('batches').select('id, name, start_date, end_date, start_time, end_time, days_of_week, faculty_id')
+                .lte('start_date', endDate)
+                .gte('end_date', startDate),
+            // Fetch only substitutions that are active within the selected date range
+            supabase.from('faculty_substitutions').select('*')
+                .lte('start_date', endDate)
+                .gte('end_date', startDate)
+        ]);
+        
         if (facultiesError) throw facultiesError;
-
-        const { data: batches, error: batchesError } = await supabase
-            .from('batches')
-            .select(`
-                id,
-                name,
-                start_date,
-                end_date,
-                start_time,
-                end_time,
-                days_of_week,
-                faculty_id
-            `);
         if (batchesError) throw batchesError;
+        if (substitutionsError) throw substitutionsError;
 
-        // 2. Filter faculties by skill if selected
-        let filteredFaculties = faculties;
-        if (selectedSkill) {
-            filteredFaculties = filteredFaculties.filter(f =>
-                f.skills.some(s => s.id === selectedSkill)
-            );
-        }
+        // --- Step 2: Filter faculties by skill if selected ---
+        const filteredFaculties = selectedSkill
+            ? faculties.filter(f => f.skills.some(s => s.id === selectedSkill))
+            : faculties;
 
-        // 3. The rest of the logic from the frontend's handleSearch
+        // --- Step 3: Calculate free slots for each faculty ---
         const results = [];
         const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        const timeToMinutes = (timeStr) => {
+            const [hours, minutes] = timeStr.split(':').map(Number);
+            return hours * 60 + minutes;
+        };
+        const minutesToTime = (minutes) => {
+            const h = Math.floor(minutes / 60).toString().padStart(2, '0');
+            const m = (minutes % 60).toString().padStart(2, '0');
+            return `${h}:${m}:00`;
+        };
 
-        filteredFaculties.forEach(faculty => {
-            const facultySlots = { faculty, slots: [] };
+        for (const faculty of filteredFaculties) {
+            const facultySlots = { faculty: { id: faculty.id, name: faculty.name }, slots: [] };
             
-            const [sYear, sMonth, sDay] = startDate.split('-').map(Number);
-            let currentDate = new Date(Date.UTC(sYear, sMonth - 1, sDay));
-            const [eYear, eMonth, eDay] = endDate.split('-').map(Number);
-            const lastDate = new Date(Date.UTC(eYear, eMonth - 1, eDay));
+            let currentDate = new Date(`${startDate}T00:00:00Z`);
+            const lastDate = new Date(`${endDate}T00:00:00Z`);
 
             while (currentDate <= lastDate) {
                 const dayOfWeek = dayNames[currentDate.getUTCDay()];
@@ -65,135 +68,80 @@ const getFreeSlots = async (req, res) => {
 
                 const dailyAvailability = faculty.availability.find(a => a.day_of_week.toLowerCase() === dayOfWeek.toLowerCase());
                 if (!dailyAvailability) {
-                    currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+                    currentDate.setDate(currentDate.getDate() + 1);
                     continue;
                 }
 
-                const dailyBatches = batches.filter(b => {
-                    if (!b.faculty_id || !b.days_of_week) return false;
+                // **FIX**: Find all batches this faculty is busy with on this day
+                const busyIntervals = [];
 
-                    const [bsYear, bsMonth, bsDay] = b.start_date.split('-').map(Number);
-                    const batchStartDate = new Date(Date.UTC(bsYear, bsMonth - 1, bsDay));
-                    const [beYear, beMonth, beDay] = b.end_date.split('-').map(Number);
-                    const batchEndDate = new Date(Date.UTC(beYear, beMonth - 1, beDay));
+                // 1. Add batches they are PERMANENTLY assigned to
+                batches.forEach(batch => {
+                    const runsOnDay = batch.days_of_week.some(d => d.toLowerCase() === dayOfWeek.toLowerCase());
+                    const isActiveOnDate = new Date(batch.start_date) <= currentDate && new Date(batch.end_date) >= currentDate;
+                    
+                    // Is this the faculty's own batch AND is there NOT an active substitution for it?
+                    const isOriginalTutor = batch.faculty_id === faculty.id && !substitutions.some(s => s.batch_id === batch.id && new Date(s.start_date) <= currentDate && new Date(s.end_date) >= currentDate);
 
-                    let batchDays = [];
-                    if (Array.isArray(b.days_of_week)) {
-                        batchDays = b.days_of_week;
-                    } else if (typeof b.days_of_week === 'string') {
-                        batchDays = b.days_of_week.replace(/[{}"'\\\[\\\]]/g, '').split(',').map(d => d.trim());
+                    if (isActiveOnDate && runsOnDay && isOriginalTutor) {
+                        busyIntervals.push({ start: timeToMinutes(batch.start_time), end: timeToMinutes(batch.end_time) });
                     }
-
-                    const runsOnDay = batchDays.some(d => d.toLowerCase() === dayOfWeek.toLowerCase());
-
-                    return b.faculty_id === faculty.id &&
-                        batchStartDate <= currentDate &&
-                        batchEndDate >= currentDate &&
-                        runsOnDay;
                 });
 
-
-
-                console.log(`[${dateStr}] Faculty ${faculty.name} availability: ${dailyAvailability.start_time} - ${dailyAvailability.end_time}`);
-
-                dailyBatches.sort((a, b) => a.start_time.localeCompare(b.start_time));
-
-                console.log(`[${dateStr}] Found ${dailyBatches.length} batches for ${faculty.name}.`);
-                dailyBatches.forEach(b => {
-                    console.log(`  - Batch ${b.name} (${b.id}): ${b.start_time} - ${b.end_time}`);
+                // 2. Add batches they are TEMPORARILY substituting for
+                substitutions.forEach(sub => {
+                    const isSubstitute = sub.substitute_faculty_id === faculty.id;
+                    const isSubActiveOnDate = new Date(sub.start_date) <= currentDate && new Date(sub.end_date) >= currentDate;
+                    
+                    if (isSubstitute && isSubActiveOnDate) {
+                        const substitutedBatch = batches.find(b => b.id === sub.batch_id);
+                        if (substitutedBatch && substitutedBatch.days_of_week.some(d => d.toLowerCase() === dayOfWeek.toLowerCase())) {
+                            busyIntervals.push({ start: timeToMinutes(substitutedBatch.start_time), end: timeToMinutes(substitutedBatch.end_time) });
+                        }
+                    }
                 });
 
-                const timeToMinutes = (timeStr) => {
-                    const [hours, minutes] = timeStr.split(':').map(Number);
-                    return hours * 60 + minutes;
-                };
-
-                const minutesToTimeForLog = (minutes) => {
-                    const h = Math.floor(minutes / 60).toString().padStart(2, '0');
-                    const m = (minutes % 60).toString().padStart(2, '0');
-                    return `${h}:${m}:00`;
-                };
-
-                let availableSlots = [{ start: timeToMinutes(dailyAvailability.start_time), end: timeToMinutes(dailyAvailability.end_time) }];
-                console.log(`[${dateStr}] Initial available slots:`, availableSlots.map(s => `${minutesToTimeForLog(s.start)}-${minutesToTimeForLog(s.end)}`));
-
-                dailyBatches.forEach(batch => {
-                    const batchStart = timeToMinutes(batch.start_time);
-                    const batchEnd = timeToMinutes(batch.end_time);
-                    let nextAvailableSlots = [];
-
-                    availableSlots.forEach(slot => {
-                        // Case 1: Batch is completely outside the slot
-                        if (batchEnd <= slot.start || batchStart >= slot.end) {
-                            nextAvailableSlots.push(slot);
-                            return;
+                // --- Simplified Slot Calculation Algorithm ---
+                if (busyIntervals.length > 0) {
+                    // a. Sort and merge overlapping busy intervals
+                    busyIntervals.sort((a, b) => a.start - b.start);
+                    const mergedBusy = busyIntervals.reduce((acc, current) => {
+                        if (acc.length === 0 || current.start >= acc[acc.length - 1].end) {
+                            acc.push(current);
+                        } else {
+                            acc[acc.length - 1].end = Math.max(acc[acc.length - 1].end, current.end);
                         }
+                        return acc;
+                    }, []);
 
-                        // Case 2: Slot is completely within the batch
-                        if (batchStart <= slot.start && batchEnd >= slot.end) {
-                            // The slot is completely taken by the batch, so we add nothing to the next available slots.
-                            return;
+                    // b. Calculate free slots by "subtracting" busy slots from availability
+                    const freeSlots = [];
+                    let lastAvailableTime = timeToMinutes(dailyAvailability.start_time);
+                    mergedBusy.forEach(busySlot => {
+                        if (busySlot.start > lastAvailableTime) {
+                            freeSlots.push({ start: lastAvailableTime, end: busySlot.start });
                         }
-
-                        // Case 3: Batch starts before the slot and ends within the slot
-                        if (batchStart < slot.start && batchEnd > slot.start && batchEnd < slot.end) {
-                            nextAvailableSlots.push({ start: batchEnd, end: slot.end });
-                            return;
-                        }
-
-                        // Case 4: Batch starts within the slot and ends after the slot
-                        if (batchStart > slot.start && batchStart < slot.end && batchEnd > slot.end) {
-                            nextAvailableSlots.push({ start: slot.start, end: batchStart });
-                            return;
-                        }
-
-                        // Case 5: Batch is completely within the slot
-                        if (batchStart > slot.start && batchEnd < slot.end) {
-                            nextAvailableSlots.push({ start: slot.start, end: batchStart });
-                            nextAvailableSlots.push({ start: batchEnd, end: slot.end });
-                            return;
-                        }
-                        
-                        // Case 6: The batch start is the same as the slot start
-                        if (batchStart === slot.start && batchEnd < slot.end) {
-                            nextAvailableSlots.push({ start: batchEnd, end: slot.end });
-                            return;
-                        }
-
-                        // Case 7: The batch end is the same as the slot end
-                        if (batchEnd === slot.end && batchStart > slot.start) {
-                            nextAvailableSlots.push({ start: slot.start, end: batchStart });
-                            return;
-                        }
+                        lastAvailableTime = busySlot.end;
                     });
-                    availableSlots = nextAvailableSlots;
-                });
-
-                const minutesToTime = (minutes) => {
-                    const h = Math.floor(minutes / 60).toString().padStart(2, '0');
-                    const m = (minutes % 60).toString().padStart(2, '0');
-                    return `${h}:${m}:00`;
-                };
-
-                timeSlots = availableSlots.map(slot => ({
-                    start: minutesToTime(slot.start),
-                    end: minutesToTime(slot.end)
-                }));
-
-                if (timeSlots.length > 0 && timeSlots.some(s => s.start < s.end)) {
-                    facultySlots.slots.push({
-                        date: dateStr,
-                        time: timeSlots.filter(s => s.start < s.end).map(s => `${s.start} - ${s.end}`)
-                    });
+                    if (timeToMinutes(dailyAvailability.end_time) > lastAvailableTime) {
+                        freeSlots.push({ start: lastAvailableTime, end: timeToMinutes(dailyAvailability.end_time) });
+                    }
+                    
+                    if (freeSlots.length > 0) {
+                        facultySlots.slots.push({ date: dateStr, time: freeSlots.map(s => `${minutesToTime(s.start)} - ${minutesToTime(s.end)}`) });
+                    }
+                } else {
+                    // No busy slots, so the entire availability is free
+                    facultySlots.slots.push({ date: dateStr, time: [`${dailyAvailability.start_time} - ${dailyAvailability.end_time}`] });
                 }
 
-                currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+                currentDate.setDate(currentDate.getDate() + 1);
             }
 
             if (facultySlots.slots.length > 0) {
                 results.push(facultySlots);
             }
-        });
+        }
 
         res.json(results);
 
