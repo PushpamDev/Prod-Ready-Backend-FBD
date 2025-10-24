@@ -19,7 +19,8 @@ const getAllBatches = async (req, res) => {
     const today = new Date().toISOString().split('T')[0];
 
     const [batchesResult, substitutionsResult, allFacultiesResult] = await Promise.all([
-      // **FIX**: Corrected the foreign key syntax for `faculty` back to the original working version.
+      // This query is intentionally lightweight. It fetches the COUNT of students,
+      // not the full student objects. This is critical for performance.
       supabase.from('batches').select(`
         *,
         faculty:faculty_id(*),
@@ -44,7 +45,8 @@ const getAllBatches = async (req, res) => {
       let finalBatch = {
         ...batch,
         status: getDynamicStatus(batch.start_date, batch.end_date),
-        // The student data is now an object with a count property, so we extract the number.
+        // The student data from the query is an object like [{ count: 15 }].
+        // We extract the number here. This is what the frontend BatchTable expects.
         students: batch.students[0]?.count || 0,
         isSubstituted: false,
       };
@@ -62,7 +64,6 @@ const getAllBatches = async (req, res) => {
       return finalBatch;
     });
     
-    // Filter for faculty role after processing substitutions
     if (req.user && req.user.role === 'faculty') {
         const facultyBatches = formattedData.filter(batch => batch.faculty_id === req.user.faculty_id);
         return res.json(facultyBatches);

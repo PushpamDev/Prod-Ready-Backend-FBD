@@ -272,7 +272,7 @@ const deleteFaculty = async (req, res) => {
     }
 
     if (!faculty) {
-      return res.status(404).json({ error: 'Faculty not found' });
+      return res.status(44).json({ error: 'Faculty not found' });
     }
 
     // Log activity
@@ -285,77 +285,113 @@ const deleteFaculty = async (req, res) => {
   }
 };
 
+// ** CORRECTED FUNCTION **
 const getFacultyActiveStudents = async (req, res) => {
   try {
+    // 1. Get all faculties and their related batches and students in one go
+    const { data: faculties, error } = await supabase
+      .from("faculty")
+      .select(`
+        id,
+        name,
+        batches (
+          id,
+          start_date,
+          end_date,
+          batch_students ( student_id )
+        )
+      `);
+
+    if (error) throw error;
+
+    // 2. Process the data in JavaScript
+    const facultyData = faculties.map(faculty => {
+      const uniqueStudentIds = new Set();
+      
+      // Iterate over each faculty's batches
+      (faculty.batches || []).forEach(batch => {
+        // Check if the batch is active
+        const status = getDynamicStatus(batch.start_date, batch.end_date);
+        if (status === "Active") {
+          // If active, add all its students to the Set
+          // The Set automatically handles duplicates
+          (batch.batch_students || []).forEach(student => {
+            uniqueStudentIds.add(student.student_id);
+          });
+        }
+      });
+
+      // The size of the Set is the total number of unique active students
+      return {
+        faculty_id: faculty.id,
+        faculty_name: faculty.name,
+        active_students: uniqueStudentIds.size,
+      };
+    });
+
+    res.status(200).json(facultyData);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const getFacultyTotalStudents = async (req, res) => {
+  const { faculty_id } = req.params;
+
+  if (!faculty_id) {
+    return res.status(400).json({ error: "Faculty ID is required" });
+  }
+
+  try {
+    // Call the database function
+    const { data, error } = await supabase.rpc(
+      'get_faculty_unique_student_count', 
+      { faculty_uuid: faculty_id } // Pass the argument
+    );
+
+    if (error) {
+      throw error;
+    }
+
+    res.status(200).json({ total_students: data });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ** NEW FUNCTION **
+const getFacultyStudentCounts = async (req, res) => {
+  try {
+    // 1. Get all faculties
     const { data: faculties, error: facultyError } = await supabase
       .from("faculty")
       .select("id, name");
 
     if (facultyError) throw facultyError;
 
-    const { data: batches, error: batchesError } = await supabase
-      .from("batches")
-      .select("id, faculty_id, start_date, end_date");
-
-    if (batchesError) throw batchesError;
-
-    const activeBatches = batches.filter(
-      (batch) => getDynamicStatus(batch.start_date, batch.end_date) === "Active"
+    // 2. For each faculty, call the RPC to get the count
+    const counts = await Promise.all(
+      faculties.map(async (faculty) => {
+        const { data: count, error: rpcError } = await supabase.rpc(
+          'get_faculty_unique_student_count', 
+          { faculty_uuid: faculty.id }
+        );
+        
+        if (rpcError) {
+           console.error(`Error fetching count for faculty ${faculty.id}:`, rpcError);
+           return { faculty_id: faculty.id, name: faculty.name, total_students: 0 };
+        }
+        
+        return { faculty_id: faculty.id, name: faculty.name, total_students: count };
+      })
     );
 
-    const activeBatchIds = activeBatches.map((b) => b.id);
-
-    if (activeBatchIds.length === 0) {
-      const facultyData = faculties.map((faculty) => ({
-        faculty_id: faculty.id,
-        faculty_name: faculty.name,
-        active_students: 0,
-      }));
-      return res.status(200).json(facultyData);
-    }
-
-    const { data: studentLinks, error: studentLinksError } = await supabase
-      .from("batch_students")
-      .select("batch_id, student_id")
-      .in("batch_id", activeBatchIds);
-
-    if (studentLinksError) throw studentLinksError;
-
-    const studentsPerBatch = activeBatches.reduce((acc, batch) => {
-      const uniqueStudents = new Set(
-        studentLinks
-          .filter((link) => link.batch_id === batch.id)
-          .map((link) => link.student_id)
-      );
-      acc[batch.id] = {
-        faculty_id: batch.faculty_id,
-        student_count: uniqueStudents.size,
-      };
-      return acc;
-    }, {});
-
-    const facultyActiveStudents = faculties.map((faculty) => {
-      const count = Object.values(studentsPerBatch).reduce(
-        (total, batch) => {
-          if (batch.faculty_id === faculty.id) {
-            return total + batch.student_count;
-          }
-          return total;
-        },
-        0
-      );
-      return {
-        faculty_id: faculty.id,
-        faculty_name: faculty.name,
-        active_students: count,
-      };
-    });
-
-    res.status(200).json(facultyActiveStudents);
+    res.status(200).json(counts);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
+
 
 module.exports = {
   getAllFaculty,
@@ -363,4 +399,6 @@ module.exports = {
   updateFaculty,
   deleteFaculty,
   getFacultyActiveStudents,
+  getFacultyTotalStudents,
+  getFacultyStudentCounts, // <-- Added new function
 };

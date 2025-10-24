@@ -1,10 +1,22 @@
 const express = require('express');
 const router = express.Router();
-const { getAllStudents, createStudent, updateStudent, deleteStudent,} = require('../controllers/studentsController');
+const auth = require('../middleware/auth'); // Make sure to import auth
 
-router.get('/', getAllStudents);
-router.post('/', createStudent);
-router.put('/:id', updateStudent);
-router.delete('/:id', deleteStudent);
+const { 
+    getAllStudents, 
+    createStudent, 
+    updateStudent, 
+    deleteStudent,
+    getStudentBatches 
+} = require('../controllers/studentsController');
+
+// Standard CRUD routes with auth
+router.get('/', auth, getAllStudents);
+router.post('/', auth, createStudent);
+router.put('/:id', auth, updateStudent);
+router.delete('/:id', auth, deleteStudent);
+
+// Route to get all batches for a specific student
+router.get('/:id/batches', auth, getStudentBatches);
 
 module.exports = router;
