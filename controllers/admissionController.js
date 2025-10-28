@@ -5,6 +5,7 @@ const supabase = require('../db');
  * @description Get all admissions using the summary view with the Supabase client.
  */
 exports.getAllAdmissions = async (req, res) => {
+  // ... (No changes needed here)
   try {
     const { data, error } = await supabase
       .from('v_admission_financial_summary')
@@ -22,9 +23,9 @@ exports.getAllAdmissions = async (req, res) => {
 
 /**
  * @description Get a single admission with all related details using multiple, efficient Supabase queries.
- * This is the standard Supabase pattern for fetching related data.
  */
 exports.getAdmissionById = async (req, res) => {
+  // ... (No changes needed here)
   const { id } = req.params;
   try {
     // 1. Fetch the main admission record
@@ -80,19 +81,30 @@ exports.getAdmissionById = async (req, res) => {
  * @description Create a new admission by calling the database function via Supabase RPC.
  */
 exports.createAdmission = async (req, res) => {
-  // Destructure all expected fields from the request body
+  // UPDATED: Destructure all fields from the new frontend form
   const {
     student_name, student_phone_number, father_name, father_phone_number,
-    permanent_address, current_address, address_proof_id_number, remarks,
-    certificate_id, discount, course_ids, installments
+    permanent_address, current_address, 
+    // NEW: Fields from the frontend form
+    identification_type, identification_number, 
+    date_of_admission, course_start_date, batch_preference,
+    remarks, certificate_id, discount, course_ids, installments
+    // REMOVED: address_proof_id_number (replaced by identification fields)
   } = req.body;
 
-  // --- Robust Validation ---
+  // --- UPDATED: Robust Validation ---
   if (!student_name || !student_phone_number) {
     return res.status(400).json({ error: 'Student Name and Phone Number are required.' });
   }
-  if (!Array.isArray(course_ids) || !Array.isArray(installments)) {
-    return res.status(400).json({ error: 'Courses and Installments must be provided as arrays.' });
+  // NEW: Validate required fields from frontend
+  if (!date_of_admission) {
+    return res.status(400).json({ error: 'Date of Admission is required.' });
+  }
+  if (!Array.isArray(course_ids) || course_ids.length === 0) {
+    return res.status(400).json({ error: 'At least one course must be selected.' });
+  }
+  if (!Array.isArray(installments)) {
+    return res.status(400).json({ error: 'Installments must be provided as an array.' });
   }
   if (discount && isNaN(parseFloat(discount))) {
       return res.status(400).json({ error: 'Discount must be a valid number.' });
@@ -108,7 +120,14 @@ exports.createAdmission = async (req, res) => {
       p_father_phone_number: father_phone_number,
       p_permanent_address: permanent_address,
       p_current_address: current_address,
-      p_address_proof_id_number: address_proof_id_number,
+      
+      // UPDATED: Pass new parameters to the SQL function
+      p_identification_type: identification_type || null,
+      p_identification_number: identification_number || null,
+      p_date_of_admission: date_of_admission, // This is required
+      p_course_start_date: course_start_date || null,
+      p_batch_preference: batch_preference || null,
+      
       p_remarks: remarks,
       p_certificate_id: certificate_id || null,
       p_discount: discount || 0,
@@ -125,7 +144,11 @@ exports.createAdmission = async (req, res) => {
     if (error.message.includes('GST rate not configured')) {
         return res.status(500).json({ error: 'Server configuration error: GST rate is not set.' });
     }
+    // NEW: Handle function not found or argument mismatch
+    if (error.code === '42883') {
+       console.error("Database function error: Most likely 'create_admission_and_student' does not exist or has mismatching arguments.", error.message);
+       return res.status(500).json({ error: "Database function signature mismatch. Please update the SQL function." });
+    }
     res.status(500).json({ error: 'An error occurred while creating the admission.' });
   }
 };
-
