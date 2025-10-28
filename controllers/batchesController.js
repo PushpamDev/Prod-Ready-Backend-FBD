@@ -77,7 +77,6 @@ const getAllBatches = async (req, res) => {
 };
 
 const createBatch = async (req, res) => {
-  // This function is already correct
   const {
     name, description, startDate, endDate, startTime, endTime,
     facultyId, skillId, maxStudents, studentIds, daysOfWeek, status
@@ -114,10 +113,17 @@ const createBatch = async (req, res) => {
     }
 
     // --- Scheduling conflict check logic ---
+    
+    // --- LOGIC UPDATE ---
+    // We only check for conflicts against batches that are NOT completed.
+    // i.e., batches whose end_date is today or in the future.
+    const today = new Date().toISOString().split('T')[0];
+
     const { data: existingBatches, error: existingBatchesError } = await supabase
       .from('batches')
       .select('name, start_time, end_time, days_of_week, start_date, end_date')
-      .eq('faculty_id', facultyId);
+      .eq('faculty_id', facultyId)
+      .gte('end_date', today); // <-- THIS IS THE FIX: Ignores completed batches
 
     if (existingBatchesError) throw existingBatchesError;
 
@@ -214,11 +220,18 @@ const updateBatch = async (req, res) => {
     }
 
     // --- 2. FIXED: Scheduling conflict check ---
+    
+    // --- LOGIC UPDATE ---
+    // We only check for conflicts against batches that are NOT completed.
+    // i.e., batches whose end_date is today or in the future.
+    const today = new Date().toISOString().split('T')[0];
+    
     const { data: existingBatches, error: existingBatchesError } = await supabase
       .from('batches')
       .select('id, name, start_time, end_time, days_of_week, start_date, end_date')
       .eq('faculty_id', facultyId)
-      .neq('id', id); // <-- THE CRITICAL FIX: Exclude the current batch
+      .neq('id', id) // <-- THE CRITICAL FIX: Exclude the current batch
+      .gte('end_date', today); // <-- THIS IS THE FIX: Ignores completed batches
 
     if (existingBatchesError) throw existingBatchesError;
 
