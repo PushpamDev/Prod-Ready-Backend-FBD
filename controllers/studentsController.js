@@ -12,7 +12,7 @@ const getAllStudents = async (req, res) => {
     fee_pending,
     page = 1, 
     limit = 200 
-  } = req.query;ß
+  } = req.query;
 
   const from = (page - 1) * limit;
   const to = from + limit - 1;
