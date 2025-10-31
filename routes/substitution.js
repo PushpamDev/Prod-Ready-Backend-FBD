@@ -1,20 +1,41 @@
 const express = require('express');
 const router = express.Router();
 
-// Import all three functions from the controller
+// Import all functions from the controller
 const { 
     assignSubstitute, 
     mergeBatches, 
-    createTemporarySubstitution 
+    createTemporarySubstitution,
+    getActiveSubstitutions,  // <-- NEW
+    updateSubstitution,        // <-- NEW
+    cancelSubstitution         // <-- NEW
 } = require('../controllers/substitutionController');
 
-// **NEW**: Route for creating a temporary leave/substitution record (non-destructive)
+
+// === Temporary Substitution Routes ===
+
+// GET all active/upcoming temporary substitutions (for a dashboard)
+router.get('/temporary', getActiveSubstitutions);
+
+// POST a new temporary substitution record (non-destructive)
 router.post('/temporary', createTemporarySubstitution);
 
-// Route for PERMANENTLY re-assigning a batch to a new faculty
+// PUT (Update) an existing temporary substitution (e.g., change dates or faculty)
+// :id here refers to the ID of the 'faculty_substitutions' record
+router.put('/temporary/:id', updateSubstitution);
+
+// DELETE (Cancel) a temporary substitution
+// :id here refers to the ID of the 'faculty_substitutions' record
+router.delete('/temporary/:id', cancelSubstitution);
+
+
+// === Permanent Action Routes ===
+
+// POST for PERMANENTLY re-assigning a batch to a new faculty
 router.post('/assign', assignSubstitute);
 
-// Route for PERMANENTLY merging two batches
+// POST for PERMANENTLY merging two batches
 router.post('/merge', mergeBatches);
+
 
 module.exports = router;

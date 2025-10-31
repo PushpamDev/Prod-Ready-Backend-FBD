@@ -130,6 +130,208 @@ const createTemporarySubstitution = async (req, res) => {
     }
 };
 
+// ===============================================
+// === NEW FUNCTIONS START HERE ===
+// ===============================================
+
+/**
+ * NEW: Fetches all active or upcoming substitution records.
+ * This is for display on a management dashboard.
+ */
+const getActiveSubstitutions = async (req, res) => {
+    try {
+        const currentDate = new Date().toISOString().split('T')[0];
+        
+        const { data, error } = await supabase
+            .from('faculty_substitutions')
+            .select(`
+                id, start_date, end_date, notes,
+                batches (id, name),
+                original_faculty:original_faculty_id (id, name),
+                substitute_faculty:substitute_faculty_id (id, name)
+            `)
+            .gte('end_date', currentDate) // Only get subs that haven't ended yet
+            .order('start_date', { ascending: true });
+
+        if (error) throw error;
+        
+        res.status(200).json(data);
+    } catch (error) {
+        console.error('Error fetching active substitutions:', error);
+        res.status(500).json({ error: 'An unexpected error occurred.' });
+    }
+};
+
+/**
+ * NEW: Updates an existing substitution.
+ * Use Case: Faculty returns early (update end_date).
+ * Use Case: Student/Admin dissatisfaction (update substitute_faculty_id).
+ * Use Case: Substitute overloaded (update substitute_faculty_id).
+ * Use Case: Faculty extends leave (update end_date).
+ */
+const updateSubstitution = async (req, res) => {
+    const { id } = req.params; // Get the substitution ID from the URL
+    const { substituteFacultyId, startDate, endDate, notes } = req.body;
+
+    try {
+        // 1. Get the original substitution record and its related batch
+        const { data: originalSub, error: findError } = await supabase
+            .from('faculty_substitutions')
+            .select('*, batches(*)') // Get sub and all batch details
+            .eq('id', id)
+            .single();
+
+        if (findError || !originalSub) {
+            return res.status(404).json({ error: 'Substitution record not found.' });
+        }
+
+        // 2. Define new values, falling back to original values if not provided
+        const newSubstituteId = substituteFacultyId || originalSub.substitute_faculty_id;
+        const newStartDate = startDate || originalSub.start_date;
+        const newEndDate = endDate || originalSub.end_date;
+        // Allow notes to be explicitly set to null or empty string
+        const newNotes = notes !== undefined ? notes : originalSub.notes;
+        const leaveBatch = originalSub.batches;
+
+        // 3. --- Check for conflicts IF the substitute faculty is being changed ---
+        if (substituteFacultyId && substituteFacultyId !== originalSub.substitute_faculty_id) {
+            console.log('Substitute faculty is changing. Running conflict check...');
+            
+            if (leaveBatch.faculty_id === newSubstituteId) return res.status(400).json({ error: 'Cannot assign a faculty as their own substitute.' });
+            
+            // Use the new dates for conflict checking
+            const leaveStartDate = new Date(newStartDate);
+            const leaveEndDate = new Date(newEndDate);
+            const leaveBatchStartTime = new Date(`1970-01-01T${leaveBatch.start_time}Z`);
+            const leaveBatchEndTime = new Date(`1970-01-01T${leaveBatch.end_time}Z`);
+
+            // --- Re-run conflict checks for the NEW substitute ---
+            
+            // 3a. Check permanent schedule
+            const { data: permanentConflicts, error: permanentError } = await supabase
+                .from('batches')
+                .select('name, start_date, end_date, start_time, end_time, days_of_week')
+                .eq('faculty_id', newSubstituteId);
+            if (permanentError) throw permanentError;
+
+            for (const existingBatch of permanentConflicts) {
+                const existingStartDate = new Date(existingBatch.start_date);
+                const existingEndDate = new Date(existingBatch.end_date);
+                const existingStartTime = new Date(`1970-01-01T${existingBatch.start_time}Z`);
+                const existingEndTime = new Date(`1970-01-01T${existingBatch.end_time}Z`);
+
+                const datesOverlap = leaveStartDate <= existingEndDate && leaveEndDate >= existingStartDate;
+                const daysOverlap = leaveBatch.days_of_week.some(day => (existingBatch.days_of_week || []).includes(day));
+                const timesOverlap = leaveBatchStartTime < existingEndTime && leaveBatchEndTime > existingStartTime;
+
+                if (datesOverlap && daysOverlap && timesOverlap) {
+                    return res.status(409).json({ error: `NEW substitute has a permanent conflict with batch: ${existingBatch.name}.` });
+                }
+            }
+
+            // 3b. Check other temporary schedules
+            const { data: tempConflicts, error: tempError } = await supabase
+                .from('faculty_substitutions')
+                .select('start_date, end_date, batch:batches(name, start_time, end_time, days_of_week)')
+                .eq('substitute_faculty_id', newSubstituteId)
+                .neq('id', id); // *** CRITICAL: Exclude the record we are currently updating ***
+            
+            if (tempError) throw tempError;
+
+            for (const existingSub of tempConflicts) {
+                if (!existingSub.batch) continue;
+                const existingSubStartDate = new Date(existingSub.start_date);
+                const existingSubEndDate = new Date(existingSub.end_date);
+                const existingSubStartTime = new Date(`1970-01-01T${existingSub.batch.start_time}Z`);
+                const existingSubEndTime = new Date(`1970-01-01T${existingSub.batch.end_time}Z`);
+
+                const datesOverlap = leaveStartDate <= existingSubEndDate && leaveEndDate >= existingSubStartDate;
+                const daysOverlap = leaveBatch.days_of_week.some(day => (existingSub.batch.days_of_week || []).includes(day));
+                const timesOverlap = leaveBatchStartTime < existingSubEndTime && leaveBatchEndTime > existingSubStartTime;
+
+                if (datesOverlap && daysOverlap && timesOverlap) {
+                    return res.status(409).json({ error: `NEW substitute is already scheduled for another substitution for batch: ${existingSub.batch.name}.` });
+                }
+            }
+        } // --- End of conflict check ---
+
+        // 4. All checks passed (or faculty didn't change). Perform the update.
+        const { data: updatedSub, error: updateError } = await supabase
+            .from('faculty_substitutions')
+            .update({
+                substitute_faculty_id: newSubstituteId,
+                start_date: newStartDate,
+                end_date: newEndDate,
+                notes: newNotes
+            })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (updateError) {
+            if (updateError.code === '23P01') { // exclusion_violation
+                // This can happen if *only* the dates were changed, and they now
+                // overlap with another substitution for the *same* batch.
+                return res.status(409).json({ error: 'The new dates overlap with another substitution for this same batch.' });
+            }
+            throw updateError;
+        }
+
+        await logActivity('updated', `substitution for batch ${leaveBatch.name}`, req.user?.id || 'Admin');
+        res.status(200).json(updatedSub);
+
+    } catch (error) {
+        console.error('Error updating substitution:', error);
+        res.status(500).json({ error: 'An unexpected error occurred.' });
+    }
+};
+
+/**
+ * NEW: Deletes/Cancels a temporary substitution record.
+ * Use Case: Original faculty's leave is cancelled entirely.
+ * Use Case: Admin error, just need to delete the record.
+ * Alternative for: Faculty returns early (just delete it instead of updating end_date).
+ */
+const cancelSubstitution = async (req, res) => {
+    const { id } = req.params; // Get the substitution ID from the URL
+
+    try {
+        // We select the batch name before deleting for logging purposes
+        const { data: substitution, error: deleteError } = await supabase
+            .from('faculty_substitutions')
+            .delete()
+            .eq('id', id)
+            .select(`
+                id,
+                batches (name)
+            `)
+            .single();
+
+        if (deleteError) {
+            if (deleteError.code === 'PGRST116') { // PostgREST code for "No rows returned"
+                return res.status(404).json({ error: 'Substitution record not found.' });
+            }
+            throw deleteError;
+        }
+        
+        // This check handles the case where PGRST116 is not thrown but data is null
+        if (!substitution) {
+            return res.status(404).json({ error: 'Substitution record not found.' });
+        }
+
+        await logActivity('deleted', `substitution for batch ${substitution.batches?.name || id}`, req.user?.id || 'Admin');
+        res.status(200).json({ message: 'Substitution cancelled successfully.' });
+
+    } catch (error) {
+        console.error('Error cancelling substitution:', error);
+        res.status(500).json({ error: 'An unexpected error occurred.' });
+    }
+};
+
+// ===============================================
+// === NEW FUNCTIONS END HERE ===
+// ===============================================
+
 
 /**
  * Performs a PERMANENT reassignment of a batch to a new faculty.
@@ -222,6 +424,9 @@ const mergeBatches = async (req, res) => {
 
 module.exports = {
     createTemporarySubstitution,
+    getActiveSubstitutions, // <-- NEW
+    updateSubstitution,     // <-- NEW
+    cancelSubstitution,     // <-- NEW
     assignSubstitute,
     mergeBatches,
 };
