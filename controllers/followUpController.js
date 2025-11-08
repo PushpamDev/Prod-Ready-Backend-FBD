@@ -5,13 +5,14 @@ const { format } = require('date-fns');
 /**
  * @description Get the task list for the main follow-up dashboard.
  * Queries the GROUPED 'v_follow_up_task_list' view.
+ * This is for the dashboard (e.g., "What are my tasks today?")
  */
 exports.getFollowUpTasks = async (req, res) => {
   const { filter } = req.query; // today | overdue | upcoming
 
   try {
     let query = supabase
-      .from('v_follow_up_task_list')
+      .from('v_follow_up_task_list') // Correctly uses the dashboard view
       .select('*');
 
     const today = format(new Date(), 'yyyy-MM-dd');
@@ -39,8 +40,41 @@ exports.getFollowUpTasks = async (req, res) => {
 };
 
 /**
+ * @description Get the *entire* follow-up history for one admission.
+ * Queries the 'follow_up_details' view we created.
+ * This is for the student's detail page (e.g., "Show me all communication for this student")
+ */
+exports.getFollowUpHistoryForAdmission = async (req, res) => {
+  const { admissionId } = req.params;
+
+  if (!admissionId) {
+    return res.status(400).json({ error: 'Admission ID is required.' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('follow_up_details') // Using our new view
+      .select('*')
+      .eq('admission_id', admissionId)
+      .order('log_date', { ascending: false }); // Show newest logs first
+
+    if (error) throw error;
+
+    if (!data) {
+      return res.status(404).json({ error: 'No follow-up history found for this admission.' });
+    }
+
+    res.status(200).json(data);
+  } catch (error) {
+    console.error('Error fetching follow-up history:', error);
+    res.status(500).json({ error: 'An unexpected error occurred.' });
+  }
+};
+
+
+/**
  * @description Create a new CRM follow-up communication log and schedule the next task.
- * Does NOT record financial payments.
+ * Inserts into the base 'follow_ups' table.
  */
 exports.createFollowUpLog = async (req, res) => {
   const {
@@ -66,7 +100,7 @@ exports.createFollowUpLog = async (req, res) => {
 
   try {
     const { data, error } = await supabase
-      .from('follow_ups')
+      .from('follow_ups') // Correctly inserts into the base table
       .insert({
         admission_id,
         user_id,
@@ -90,7 +124,3 @@ exports.createFollowUpLog = async (req, res) => {
     res.status(500).json({ error: 'An error occurred while creating the follow-up log.' });
   }
 };
-
-// ** REMOVED exports.getAdmissionFollowUpDetails **
-// The frontend component StudentFollowUpDetail should now call
-// GET /api/accounts/admissions/:admissionId handled by accountsController.getAccountDetails
