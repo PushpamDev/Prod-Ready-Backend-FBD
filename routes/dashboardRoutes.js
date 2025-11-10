@@ -1,10 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const { getDashboardSummary } = require('../controllers/dashboardController');
+// UPDATED: Import the correct function name
+const { getDashboardData } = require('../controllers/dashboardController');
 const auth = require('../middleware/auth');
 
 // This will be our one and only dashboard endpoint
 // GET /api/dashboard/
-router.get('/', auth, getDashboardSummary);
+// UPDATED: Use the correct function
+router.get('/', auth, getDashboardData);
 
 module.exports = router;

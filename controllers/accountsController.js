@@ -1,20 +1,30 @@
 // controllers/accountsController.js
 const supabase = require('../db');
 
+// --- Helper for new receipt number ---
+const generateReceiptNumber = () => {
+  const now = new Date();
+  const pad = (num) => String(num).padStart(2, '0');
+  const day = pad(now.getDate());
+  const month = pad(now.getMonth() + 1);
+  const year = now.getFullYear();
+  const hours = pad(now.getHours());
+  const minutes = pad(now.getMinutes());
+  const seconds = pad(now.getSeconds());
+  return `RVM BEYOND/${day}-${month}-${year}/${hours}${minutes}${seconds}`;
+};
+
 /**
  * @description Get admissions list for the approval page or general accounts view.
- * Filters by status ('Pending', 'Approved', 'Rejected', 'All').
- * Fetches summary data using the financial view.
  */
 exports.getAdmissionsForAccounts = async (req, res) => {
-  const { status = 'Approved', search = '' } = req.query; // Default to 'Approved' for Accounts Page
+  const { status = 'Approved', search = '' } = req.query; 
 
   try {
     let query = supabase
-      .from('v_admission_financial_summary') // Use the summary view for efficiency
+      .from('v_admission_financial_summary') 
       .select(
-        // CORRECTED: Select 'created_at' instead of 'date_of_admission' from the view
-        'admission_id, student_name, student_phone_number, created_at, total_payable_amount, total_paid, remaining_due, approval_status'
+        'admission_id, student_name, student_phone_number, created_at, total_payable_amount, total_paid, remaining_due, approval_status, status, base_amount'
       );
 
     if (status && status !== 'All') {
@@ -31,18 +41,17 @@ exports.getAdmissionsForAccounts = async (req, res) => {
 
     if (error) throw error;
 
-    // Format data for frontend tables
     const formattedData = data.map((adm) => ({
       id: adm.admission_id,
       name: adm.student_name || 'N/A',
-      // CORRECTED: Map the 'created_at' column to 'admission_date' for the frontend
       admission_date: adm.created_at,
-      final_fees: adm.total_payable_amount, // Renamed for frontend consistency
       total_payable_amount: adm.total_payable_amount,
       total_paid: adm.total_paid,
       balance: adm.remaining_due,
       approval_status: adm.approval_status,
+      status: adm.status,
       phone_number: adm.student_phone_number || 'N/A',
+      base_amount: adm.base_amount
     }));
 
     res.status(200).json(formattedData);
@@ -53,41 +62,42 @@ exports.getAdmissionsForAccounts = async (req, res) => {
 };
 
 /**
- * @description Approve an admission. (No GST logic here anymore)
- * Sets status to Approved. Assumes final amount calculation happened during creation or elsewhere.
+ * @description Approve an admission.
  */
 exports.approveAdmission = async (req, res) => {
   const { admissionId } = req.params;
-  // Removed GST fields from req.body for this simplified version
+  const { is_gst_exempt, gst_rate, finalAmountWithGST } = req.body;
+
+  if (finalAmountWithGST === undefined || finalAmountWithGST < 0) {
+    return res.status(400).json({ error: 'Final payable amount is required.' });
+  }
 
   try {
-    // Fetch the admission to ensure total_payable_amount is set
     const { data: admissionData, error: fetchError } = await supabase
         .from('admissions')
-        .select('total_payable_amount') // Ensure this field has the final calculated value
+        .select('final_payable_amount')
         .eq('id', admissionId)
         .single();
 
     if (fetchError || !admissionData) {
          return res.status(404).json({ error: 'Admission not found.' });
     }
-     // Optional: You could still add a check here if total_payable_amount looks unset (e.g., is 0 or null)
-     // if (!admissionData.total_payable_amount) {
-     //     return res.status(400).json({ error: 'Final payable amount not set for this admission.'});
-     // }
-
+    
+    const taxableAmount = admissionData.final_payable_amount;
+    const gstAmount = finalAmountWithGST - taxableAmount;
 
     const { data, error } = await supabase
       .from('admissions')
       .update({
         approval_status: 'Approved',
-        // Clear rejection reason if previously rejected
         rejection_reason: null,
-        // GST fields (is_gst_exempt, gst_rate) should be set during creation or via a separate update if needed
-        // total_payable_amount is assumed to be correctly calculated already
+        is_gst_exempt: is_gst_exempt,
+        gst_rate: is_gst_exempt ? 0 : gst_rate,
+        gst_amount: gstAmount,
+        total_payable_amount: finalAmountWithGST
       })
       .eq('id', admissionId)
-      .eq('approval_status', 'Pending') // Only approve pending ones
+      .eq('approval_status', 'Pending') 
       .select('id')
       .single();
 
@@ -109,7 +119,7 @@ exports.approveAdmission = async (req, res) => {
 
 
 /**
- * @description Reject an admission. (No change)
+ * @description Reject an admission.
  */
 exports.rejectAdmission = async (req, res) => {
     const { admissionId } = req.params;
@@ -145,22 +155,19 @@ exports.rejectAdmission = async (req, res) => {
 };
 
 /**
- * @description [CONSOLIDATED] Record a payment for an admission.
- * This is the single endpoint for recording payments.
- * CRITICAL: Calls a database function to update installment statuses.
+ * @description Record a payment for an admission.
  */
 exports.recordPayment = async (req, res) => {
-    const { admission_id, amount_paid, payment_date, method, receipt_number, notes } = req.body;
-    const user_id = req.user?.id;
+    const { admission_id, amount_paid, payment_date, method, notes } = req.body;
+    const user_id = req.user?.id; 
 
-    // Validation (same as before)
     if (!admission_id || !amount_paid || !payment_date || !method || !user_id) {
         return res.status(400).json({ error: 'admission_id, amount_paid, payment_date, method, and user_id are required.' });
     }
-    // ... other validation ...
+
+    const newReceiptNumber = generateReceiptNumber();
 
     try {
-        // 1. Insert the payment record
         const { data: paymentData, error: paymentError } = await supabase
             .from('payments')
             .insert({
@@ -168,147 +175,108 @@ exports.recordPayment = async (req, res) => {
                 amount_paid: parseFloat(amount_paid),
                 payment_date,
                 method,
-                receipt_number,
+                receipt_number: newReceiptNumber,
                 notes,
                 created_by: user_id
             })
-            .select('id') // Select the ID of the newly created payment
+            .select('id') 
             .single();
 
         if (paymentError) throw paymentError;
 
-        // --- CRITICAL STEP: Update Installment Status ---
-        // Call a database function to apply this payment to the installments
         const { error: updateError } = await supabase.rpc('apply_payment_to_installments', {
-             p_payment_id: paymentData.id // Pass the new payment ID
+             p_payment_id: paymentData.id
         });
 
         if (updateError) {
-             // Log this critical error, maybe attempt compensation or alert admin
              console.error(`CRITICAL: Failed to apply payment ${paymentData.id} to installments for admission ${admission_id}:`, updateError);
-             // Decide how to respond. Maybe return success but with a warning?
-             // Or return an error indicating partial failure. For now, let's return an error.
              return res.status(500).json({
                  error: 'Payment recorded, but failed to update installment status. Please check manually.',
                  details: updateError.message
              });
         }
-        // --- End Critical Step ---
-
+    
         res.status(201).json({ message: 'Payment recorded and applied successfully.', data: paymentData });
 
     } catch (error) {
         console.error('Error recording payment:', error);
-        // ... (existing error handling) ...
         res.status(500).json({ error: 'An error occurred while recording the payment.' });
     }
 };
 
 /**
- * @description [NEW & CONSOLIDATED] Get details for the Accounts/Follow-up detail page.
- * Includes financial summary, ORIGINAL installments, ACTUAL payments, and follow-up log.
- * Replaces feeController.getInstallmentsForAdmission & parts of followUpController.getAdmissionFollowUpDetails
+ * @description Get details for the Accounts detail page.
  */
 exports.getAccountDetails = async (req, res) => {
   const { admissionId } = req.params;
   if (!admissionId) return res.status(400).json({ error: 'Admission ID is required.' });
 
   try {
-    // Use Promise.all for parallel fetching
     const [
       financialsResult,
       installmentsResult,
       paymentsResult,
-      followUpsResult,
-      // Optional: Fetch courses if needed for detail view
       coursesResult
     ] = await Promise.all([
-      // 1. Financial Summary
       supabase.from('v_admission_financial_summary')
-              .select('student_name, student_phone_number, total_payable_amount, total_paid, remaining_due, branch') // Assuming branch is in the view or admissions table
+              .select('student_name, total_payable_amount, total_paid, remaining_due, student_phone_number, branch') 
               .eq('admission_id', admissionId)
-              .maybeSingle(), // Use maybeSingle to handle not found gracefully
-      // 2. Original Installment Plan (using v_installment_status for consistency)
-      supabase.from('v_installment_status') // Use the status view
-              .select('id, due_date, amount_due, status') // Select required fields
+              .single(),
+      supabase.from('v_installment_status') 
+              .select('id, due_date, amount_due, status') 
               .eq('admission_id', admissionId)
               .order('due_date', { ascending: true }),
-      // 3. Actual Payment History
       supabase.from('payments')
               .select('id, payment_date, amount_paid, method, receipt_number, notes')
               .eq('admission_id', admissionId)
               .order('payment_date', { ascending: true }),
-      // 4. Follow-up Log History
-      supabase.from('follow_ups')
-              .select('*, user:users ( username )')
-              .eq('admission_id', admissionId)
-              .order('follow_up_date', { ascending: false }),
-      // 5. Courses (Optional - only if needed on this page)
       supabase.from('admission_courses')
-              .select('course:courses ( name, price )') // Adjusted join syntax
+              .select('courses ( name )')
               .eq('admission_id', admissionId)
     ]);
 
-    // Check for critical errors (e.g., financials failed)
     if (financialsResult.error) throw financialsResult.error;
     if (installmentsResult.error) throw installmentsResult.error;
-    // Log non-critical errors but continue
-    if (paymentsResult.error) console.error("Error fetching payments:", paymentsResult.error);
-    if (followUpsResult.error) console.error("Error fetching follow-ups:", followUpsResult.error);
-    if (coursesResult.error) console.error("Error fetching courses:", coursesResult.error);
+    if (paymentsResult.error) throw paymentsResult.error;
+    if (coursesResult.error) throw coursesResult.error;
 
+    const financials = financialsResult.data;
 
-    const financials = financialsResult.data; // Can be null if not found
-    if (!financials) {
-       return res.status(404).json({ error: 'Admission financial summary not found.' });
-    }
-
-    // Format data for response
     const responseData = {
       name: financials.student_name,
       phones: [financials.student_phone_number],
-      branch: financials.branch || "Faridabad_branch", // Use fetched branch or fallback
+      branch: financials.branch,
       total_fees: financials.total_payable_amount,
       total_paid: financials.total_paid,
       balance: financials.remaining_due,
-      // Original Installment Plan
       installments: (installmentsResult.data || []).map(inst => ({
         id: inst.id,
         due_date: inst.due_date,
-        amount: inst.amount_due, // Use amount_due from the status view
+        amount: inst.amount_due, 
         status: inst.status
       })),
-      // Actual Payments
       payments: paymentsResult.data || [],
-      // Follow Up History
-      follow_up_history: (followUpsResult.data || []).map(f => ({
-        id: f.id,
-        type: f.type,
-        follow_up_date: f.follow_up_date,
-        remarks: f.notes,
-        followed_by: f.user ? f.user.username : 'System',
-      })),
-      // Courses
-      courses: (coursesResult.data || []).map(c => c.course ? `${c.course.name}-${c.course.price}` : 'Unknown Course')
+      courses: (coursesResult.data || []).map(c => c.courses.name)
     };
 
     res.status(200).json(responseData);
 
   } catch (error) {
     console.error(`Error fetching account details for admission ${admissionId}:`, error);
+    if (error.code === 'PGRST116') {
+      return res.status(404).json({ error: 'Admission financial summary not found.' });
+    }
     res.status(500).json({ error: 'An unexpected server error occurred.' });
   }
 };
 
 
 /**
- * @description [CONSOLIDATED] Get data needed to generate a receipt for a specific payment.
- * Replaces feeController.getReceiptDetails
+ * @description [UPDATED] Get data needed to generate a receipt for a specific payment.
+ * Now joins to 'batches' to get the *actual* assigned batch.
  */
 exports.getReceiptData = async (req, res) => {
     const { paymentId } = req.params;
-    // ... (logic is largely the same as your original getReceiptData, ensure joins/selects match final schema) ...
-    // Make sure to fetch admission details like gst_rate, is_gst_exempt for calculations.
     if (!paymentId) {
         return res.status(400).json({ error: 'Payment ID is required.' });
     }
@@ -317,62 +285,85 @@ exports.getReceiptData = async (req, res) => {
             .from('payments')
             .select(`
                 *,
-                admission:admissions (
-                    id, date_of_admission, gst_rate, is_gst_exempt, total_payable_amount,
-                    student:students ( name, phone_number, father_name, current_address ),
-                    courses:admission_courses ( course:courses ( name, price ) )
+                admissions (
+                    id, 
+                    date_of_admission, 
+                    gst_rate, 
+                    is_gst_exempt, 
+                    total_payable_amount,
+                    batch_preference,
+                    father_name,
+                    current_address,
+                    students ( 
+                        name, 
+                        phone_number, 
+                        admission_number,
+                        batch_students ( batches ( name ) ) 
+                    ),
+                    admission_courses ( courses ( name, price ) )
                 )
             `)
             .eq('id', paymentId)
             .single();
 
-        if (payError) throw payError;
-        if (!payment || !payment.admission) {
+        if (payError) {
+            console.error("Supabase query failed:", payError);
+            throw payError;
+        }
+        
+        const admissionData = payment.admissions;
+        if (!payment || !admissionData) {
             return res.status(404).json({ error: 'Payment or associated admission not found.' });
         }
+        
+        const studentData = admissionData.students;
+        const coursesData = admissionData.admission_courses;
 
-        // GST Calculation (same as before)
-        // ...
-         let gstBreakdown = { cgst: 0, sgst: 0, totalGst: 0, rate: 0 };
+        // --- NEW: Get actual batch names ---
+        const batchData = studentData?.batch_students || [];
+        const actualBatches = batchData.map(bs => bs.batches?.name).filter(Boolean);
+        const batchString = actualBatches.length > 0 ? actualBatches.join(', ') : 'Not Allotted';
+        // --- End New ---
+
+        let gstBreakdown = { cgst: 0, sgst: 0, totalGst: 0, rate: 0 };
         let taxableAmount = payment.amount_paid;
-         if (!payment.admission.is_gst_exempt && payment.admission.gst_rate > 0) {
-            const rate = payment.admission.gst_rate / 100;
+         if (!admissionData.is_gst_exempt && admissionData.gst_rate > 0) {
+            const rate = admissionData.gst_rate / 100;
             taxableAmount = payment.amount_paid / (1 + rate);
             const totalGst = payment.amount_paid - taxableAmount;
             gstBreakdown = {
                 cgst: totalGst / 2,
                 sgst: totalGst / 2,
                 totalGst: totalGst,
-                rate: payment.admission.gst_rate
+                rate: admissionData.gst_rate
             };
         }
 
-
-        // Structure receipt data (same as before)
         const receiptData = {
-             receipt_number: payment.receipt_number || `TEMP-${payment.id.slice(0, 8)}`,
+             receipt_number: payment.receipt_number,
             payment_date: payment.payment_date,
             payment_method: payment.method,
             amount_paid: payment.amount_paid,
-            amount_in_words: "Placeholder - Implement amount to words function", // TODO
-            student_name: payment.admission.student?.name,
-            father_name: payment.admission.student?.father_name, // Changed from student
-            address: payment.admission.student?.current_address, // Changed from student
-            admission_date: payment.admission.date_of_admission,
-            courses: payment.admission.courses?.map(c => c.course?.name).join(', ') || 'N/A', // Safer mapping
+            amount_in_words: "Placeholder - Implement amount to words function",
+            
+            admission_id: admissionData.id, 
+            student_name: studentData?.name,
+            student_phone: studentData?.phone_number,
+            father_name: admissionData.father_name,
+            address: admissionData.current_address,
+            id_card_no: studentData?.admission_number, 
+            admission_batch: batchString, // <-- FIXED
+            
+            admission_date: admissionData.date_of_admission,
+            courses: coursesData?.map(c => c.courses?.name).join(', ') || 'N/A',
+            
             taxable_amount: taxableAmount,
             gst_summary: gstBreakdown,
-            total_payable_admission: payment.admission.total_payable_amount,
-            // TODO: Fetch previous balance by summing payments before this one's date
+            total_payable_admission: admissionData.total_payable_amount,
         };
         res.status(200).json(receiptData);
     } catch(error) {
         console.error(`Error fetching receipt data for payment ${paymentId}:`, error);
-        // ... (error handling)
-        res.status(500).json({ error: 'An unexpected error occurred.'});
+        res.status(500).json({ error: 'An unexpected server error occurred.', details: error.message });
     }
 };
-
-// --- Functions absorbed from feeController (potentially remove feeController) ---
-// Note: getInstallmentsForAdmission is effectively replaced by getAccountDetails
-// Note: getReceiptsForAdmission can be replaced by querying the 'payments' table directly if needed

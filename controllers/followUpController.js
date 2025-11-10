@@ -4,30 +4,69 @@ const { format } = require('date-fns');
 
 /**
  * @description Get the task list for the main follow-up dashboard.
- * Queries the GROUPED 'v_follow_up_task_list' view.
- * This is for the dashboard (e.g., "What are my tasks today?")
+ * [UPDATED] Now correctly filters the 'Today' tab.
  */
 exports.getFollowUpTasks = async (req, res) => {
-  const { filter } = req.query; // today | overdue | upcoming
+  const { 
+    dateFilter, // 'today', 'overdue', 'upcoming'
+    searchTerm,
+    batchName,
+    assignedTo,
+    dueAmountMin,
+    startDate,
+    endDate 
+  } = req.query;
 
   try {
     let query = supabase
-      .from('v_follow_up_task_list') // Correctly uses the dashboard view
+      .from('v_follow_up_task_list')
       .select('*');
 
     const today = format(new Date(), 'yyyy-MM-dd');
 
-    // Filter by the most urgent task date for that student
-    if (filter === 'today') {
+    // --- THIS IS THE FIX ---
+
+    // A. Date Filter Tabs
+    if (dateFilter === 'today') {
       query = query.eq('next_task_due_date', today);
-    } else if (filter === 'overdue') {
+      
+      // AND (the last log was created before today OR there is no log at all)
+      // This prevents students who were already contacted today from appearing.
+      query = query.or(`last_log_created_at.is.null,last_log_created_at.lt.${today}`);
+      
+    } else if (dateFilter === 'overdue') {
       query = query.lt('next_task_due_date', today);
-    } else if (filter === 'upcoming') {
+    } else if (dateFilter === 'upcoming') {
       query = query.gt('next_task_due_date', today);
     }
-    // 'all' (default) applies no date filter
 
-    // Order by the most urgent date
+    // --- END OF FIX ---
+
+    // B. Search Term
+    if (searchTerm) {
+      query = query.or(`student_name.ilike.%${searchTerm}%,student_phone.ilike.%${searchTerm}%`);
+    }
+
+    // C. Advanced Filters
+    if (batchName) {
+      query = query.eq('batch_name', batchName);
+    }
+    if (assignedTo) {
+      query = query.eq('assigned_to', assignedTo);
+    }
+    if (dueAmountMin) {
+      query = query.gte('total_due_amount', dueAmountMin);
+    }
+    
+    // D. Custom Date Range (if dateFilter is not set to a tab)
+    if (startDate) {
+      query = query.gte('next_task_due_date', startDate);
+    }
+    if (endDate) {
+      query = query.lte('next_task_due_date', endDate);
+    }
+
+    // 3. Execute the query
     const { data, error } = await query.order('next_task_due_date', { ascending: true });
 
     if (error) throw error;
@@ -39,43 +78,10 @@ exports.getFollowUpTasks = async (req, res) => {
   }
 };
 
-/**
- * @description Get the *entire* follow-up history for one admission.
- * Queries the 'follow_up_details' view we created.
- * This is for the student's detail page (e.g., "Show me all communication for this student")
- */
-exports.getFollowUpHistoryForAdmission = async (req, res) => {
-  const { admissionId } = req.params;
 
-  if (!admissionId) {
-    return res.status(400).json({ error: 'Admission ID is required.' });
-  }
+// ... (rest of your file: createFollowUpLog, getFollowUpHistoryForAdmission) ...
+// (Make sure to paste your other functions here)
 
-  try {
-    const { data, error } = await supabase
-      .from('follow_up_details') // Using our new view
-      .select('*')
-      .eq('admission_id', admissionId)
-      .order('log_date', { ascending: false }); // Show newest logs first
-
-    if (error) throw error;
-
-    if (!data) {
-      return res.status(404).json({ error: 'No follow-up history found for this admission.' });
-    }
-
-    res.status(200).json(data);
-  } catch (error) {
-    console.error('Error fetching follow-up history:', error);
-    res.status(500).json({ error: 'An unexpected error occurred.' });
-  }
-};
-
-
-/**
- * @description Create a new CRM follow-up communication log and schedule the next task.
- * Inserts into the base 'follow_ups' table.
- */
 exports.createFollowUpLog = async (req, res) => {
   const {
     admission_id,
@@ -87,40 +93,63 @@ exports.createFollowUpLog = async (req, res) => {
 
   const user_id = req.user?.id; // Assumes auth middleware sets req.user
 
-  // Validation
   if (!admission_id || !user_id) {
     return res.status(400).json({ error: 'admission_id and user_id are required.' });
   }
-  if (!next_follow_up_date) {
-    return res.status(400).json({ error: 'A "Next Follow-up Date" is required to schedule the next task.' });
-  }
-   if (isNaN(Date.parse(next_follow_up_date))) {
-        return res.status(400).json({ error: 'Invalid next_follow_up_date.' });
-    }
+  // Note: We allow next_follow_up_date to be null
+  // This signifies the task is "completed" without scheduling a new one.
 
   try {
     const { data, error } = await supabase
-      .from('follow_ups') // Correctly inserts into the base table
+      .from('follow_ups')
       .insert({
         admission_id,
         user_id,
         notes: notes || '',
-        follow_up_date: new Date().toISOString(), // Log created *now*
-        next_follow_up_date: next_follow_up_date, // Next task due on this date
-        type: type || 'Call', // Default type
+        follow_up_date: new Date().toISOString(), // This is the log date (NOW)
+        next_follow_up_date: next_follow_up_date || null, // Next task due date
+        type: type || 'Call',
         lead_type: lead_type || null
       })
-      .select('id') // Return the ID of the created log
+      .select('id')
       .single();
 
     if (error) throw error;
 
-    res.status(201).json({ message: "Follow-up log saved. Next task has been scheduled.", data });
+    res.status(201).json({ message: "Follow-up log saved.", data });
   } catch (error) {
     console.error('Error creating follow-up log:', error);
-    if (error.code === '23503') { // Foreign key violation
+    if (error.code === '23503') {
       return res.status(404).json({ error: 'The specified admission or user does not exist.' });
     }
     res.status(500).json({ error: 'An error occurred while creating the follow-up log.' });
+  }
+};
+
+exports.getFollowUpHistoryForAdmission = async (req, res) => {
+  const { admissionId } = req.params;
+
+  if (!admissionId) {
+    return res.status(400).json({ error: 'Admission ID is required.' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('follow_up_details') // Using our view
+      .select('*')
+      .eq('admission_id', admissionId)
+      .order('log_date', { ascending: false }); // Show newest logs first
+
+    if (error) throw error;
+
+    if (!data) {
+      // Return empty array instead of 404, it's not an error
+      return res.status(200).json([]);
+    }
+
+    res.status(200).json(data);
+  } catch (error) {
+    console.error('Error fetching follow-up history:', error);
+    res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
