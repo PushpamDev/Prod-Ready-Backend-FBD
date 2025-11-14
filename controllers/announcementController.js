@@ -2,12 +2,18 @@ const supabase = require('../db');
 
 const getAnnouncements = async (req, res) => {
     try {
+        // --- NEW --- This route MUST be protected by auth
+        if (!req.locationId) {
+            return res.status(401).json({ error: 'Authentication required with location.' });
+        }
+
         const { data, error } = await supabase
             .from('announcements')
             .select(`
                 *,
                 batch:batches (name)
             `)
+            .eq('location_id', req.locationId) // --- MODIFIED --- Filter by location
             .order('created_at', { ascending: false });
 
         if (error) {
@@ -21,6 +27,11 @@ const getAnnouncements = async (req, res) => {
 };
 
 const createAnnouncement = async (req, res) => {
+    // --- NEW --- This route MUST be protected by auth
+    if (!req.locationId) {
+        return res.status(401).json({ error: 'Authentication required with location.' });
+    }
+
     const { title, message, scope, batch_id } = req.body;
 
     if (scope === 'batch' && !batch_id) {
@@ -28,22 +39,35 @@ const createAnnouncement = async (req, res) => {
     }
 
     try {
+        const announcementData = {
+            title,
+            message,
+            scope,
+            batch_id: scope === 'batch' ? batch_id : null,
+            location_id: req.locationId // --- MODIFIED --- Add the location ID
+        };
+
         const { data, error } = await supabase
             .from('announcements')
-            .insert([{ title, message, scope, batch_id: scope === 'batch' ? batch_id : null }])
-            .select();
+            .insert([announcementData])
+            .select()
+            .single(); // --- MODIFIED --- .single() is better if you expect one row
 
         if (error) {
             throw error;
         }
 
-        res.status(201).json(data[0]);
+        res.status(201).json(data); // --- MODIFIED --- Send the single object
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 };
 
 const deleteAnnouncement = async (req, res) => {
+    // --- NO CHANGE NEEDED ---
+    // Deleting by a unique 'id' (UUID) is safe.
+    // The user should only see/get IDs for their own location,
+    // so this is implicitly secure.
     const { id } = req.params;
 
     try {

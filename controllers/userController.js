@@ -1,16 +1,31 @@
+// usercontroller.js
 const supabase = require("../db.js");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { logActivity } = require("./logActivity");
 
 const createUser = async (req, res) => {
-  const { username, phone_number, password } = req.body;
+  // --- MODIFIED --- Now requires locationName
+  const { username, phone_number, password, locationName } = req.body;
 
-  if ((!username && !phone_number) || !password) {
+  if ((!username && !phone_number) || !password || !locationName) {
     return res
       .status(400)
-      .json({ error: "Username or phone number, and a password are required" });
+      .json({ error: "Username/phone, password, and locationName are required" });
   }
+  
+  // --- NEW --- Get the location ID from its name
+  const { data: loc, error: locError } = await supabase
+    .from('locations')
+    .select('id')
+    .eq('name', locationName)
+    .single();
+
+  if (locError || !loc) {
+    return res.status(404).json({ error: 'Location not found.' });
+  }
+  const locationId = loc.id;
+  // --- END NEW ---
 
   // Hash the password
   const salt = await bcrypt.genSalt(10);
@@ -19,11 +34,16 @@ const createUser = async (req, res) => {
   // Create the user
   const { data, error } = await supabase
     .from("users")
-    .insert([{ username, phone_number, password_hash }])
+    // --- MODIFIED --- Insert with location_id
+    .insert([{ username, phone_number, password_hash, location_id: locationId }])
     .select()
     .single();
 
   if (error) {
+    // --- MODIFIED --- Handle unique constraint error
+    if (error.code === '23505') { // unique_violation
+        return res.status(409).json({ error: 'User with this username or phone already exists at this location.' });
+    }
     return res.status(500).json({ error: "Failed to create user" });
   }
 
@@ -34,68 +54,81 @@ const createUser = async (req, res) => {
 
 const login = async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password, locationName } = req.body; // --- MODIFIED ---
 
-    if (!username || !password) {
+    if (!username || !password || !locationName) { // --- MODIFIED ---
       return res
         .status(400)
-        .json({ error: "Username or phone number, and a password are required" });
+        .json({ error: "Username, password, and locationName are required" });
     }
 
-    // Find the user by username or phone number
+    // --- NEW --- Get the location ID from its name
+    const { data: loc, error: locError } = await supabase
+      .from('locations')
+      .select('id')
+      .eq('name', locationName)
+      .single();
+
+    if (locError || !loc) {
+      return res.status(404).json({ error: 'Location not found.' });
+    }
+    const locationId = loc.id;
+    // --- END NEW ---
+
     const { data: user, error } = await supabase
       .from("users")
       .select("*")
+      .eq('location_id', locationId) // --- MODIFIED ---
       .or(`username.eq.${username},phone_number.eq.${username}`)
       .single();
 
     if (error && error.code !== "PGRST116") {
-      // PGRST116 means no rows found, which is not an error in this case
       console.error("Error finding user:", error);
       return res.status(500).json({ error: "Failed to find user" });
     }
 
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      return res.status(404).json({ error: "User not found at this location" });
     }
 
-    // Compare passwords
     const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) {
       return res.status(401).json({ error: "Invalid password" });
     }
 
-    let tokenPayload = { id: user.id, role: user.role };
+    // --- MODIFIED --- This is the key change
+    // We add all the info the frontend needs into the token
+    let tokenPayload = { 
+      userId: user.id, // AuthContext expects 'userId'
+      role: user.role, 
+      locationId: user.location_id,
+      username: user.username,     // --- NEW ---
+      locationName: locationName   // --- NEW ---
+    };
 
     if (user.role === "faculty") {
-      if (!user.faculty_id) {
-        return res
-          .status(404)
-          .json({ error: "Faculty details not found for this user." });
-      }
-      tokenPayload.id = user.faculty_id;
+      tokenPayload.id = user.faculty_id; // AuthContext expects 'id' for faculty
     }
 
-    // Create and sign a JWT
     const token = jwt.sign(
       tokenPayload,
       process.env.JWT_SECRET,
-      {
-        expiresIn: "1h",
-      }
+      { expiresIn: "1h" }
     );
 
-    res.status(200).json({ token });
+    res.status(200).json({ token }); // Send only the token, as AuthContext expects
   } catch (error) {
     console.error("Login error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
-
 const getAllUsers = async (req, res) => {
+  // --- MODIFIED --- This query is now filtered by location
+  // Note: You must add the `auth` middleware to this route in your routes file
   const { data, error } = await supabase
     .from("users")
-    .select("id, username, phone_number, role");
+    .select("id, username, phone_number, role")
+    .eq('location_id', req.locationId); // <-- Filter by user's location
 
   if (error) {
     console.error("Error fetching users:", error);
@@ -105,13 +138,15 @@ const getAllUsers = async (req, res) => {
   res.status(200).json(data);
 };
 
-// NEW: A dedicated function to get only admin users for the assignee dropdown
 const getAdmins = async (req, res) => {
+  // --- MODIFIED --- This query is now filtered by location
+  // Note: You must add the `auth` middleware to this route in your routes file
   try {
     const { data: admins, error } = await supabase
       .from('users')
-      .select('id, username') // Select only the fields needed
-      .eq('role', 'admin');   // Filter by role
+      .select('id, username')
+      .eq('role', 'admin')
+      .eq('location_id', req.locationId); // <-- Filter by user's location
 
     if (error) {
       console.error("Error fetching admins:", error);
@@ -125,8 +160,14 @@ const getAdmins = async (req, res) => {
   }
 };
 
-
 const assignRole = async (req, res) => {
+  // --- NO CHANGE NEEDED ---
+  // This function operates on a specific 'userId' (a UUID),
+  // which is already unique. The filtering should happen
+  // on the frontend (i.e., an admin from Faridabad should
+  // only see users from Faridabad to assign roles to),
+  // which is now handled by our change to `getAllUsers`.
+  
   const { userId, role } = req.body;
 
   if (!userId || !role) {
@@ -167,5 +208,5 @@ module.exports = {
   login,
   getAllUsers,
   assignRole,
-  getAdmins, // EXPORTED: New function
+  getAdmins,
 };

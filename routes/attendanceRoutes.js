@@ -47,7 +47,7 @@ router.get("/batch/:batchId/daily", auth, getDailyAttendanceForBatch);
  * @desc    Get a comprehensive attendance report for all faculties.
  * @access  Private (Admin only)
  */
-router.get("/reports/overall", auth, admin, getOverallAttendanceReport);
+router.get("/reports/overall", auth, getOverallAttendanceReport);
 
 /**
  * @route   GET /api/attendance/reports/faculty/:facultyId

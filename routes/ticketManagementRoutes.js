@@ -13,23 +13,23 @@ const {
 // @route   GET /api/tickets
 // @desc    Get all tickets with filtering, searching, and pagination
 // @access  Private (add auth middleware if needed)
-router.get('/', getAllTickets);
+router.get('/', auth , getAllTickets);
 
 // @route   POST /api/tickets
 // @desc    Create a new ticket
 // @access  Private (add auth middleware if needed)
-router.post('/', createTicket);
+router.post('/', auth ,createTicket);
 
 // NEW: This route must come BEFORE the '/:id' route
 // @route   GET /api/tickets/categories
 // @desc    Get a unique list of all ticket categories
 // @access  Private (add auth middleware if needed)
-router.get('/categories', getTicketCategories);
+router.get('/categories',auth,  getTicketCategories);
 
 // @route   GET /api/tickets/:id
 // @desc    Get a single ticket by its ID
 // @access  Private (add auth middleware if needed)
-router.get('/:id', getTicketById);
+router.get('/:id',auth, getTicketById);
 
 // @route   PATCH /api/tickets/:id
 // @desc    Update a ticket's status or assignee

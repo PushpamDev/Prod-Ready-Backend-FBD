@@ -3,8 +3,14 @@ const { logActivity } = require('./logActivity');
 
 /**
  * **UPDATED**: Fetches all students with server-side filtering and pagination.
+ * (Now location-aware)
  */
 const getAllStudents = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+
   const { 
     search, 
     faculty_id, 
@@ -18,19 +24,20 @@ const getAllStudents = async (req, res) => {
   const to = from + limit - 1;
 
   try {
-    // 1. Start building the query WITH .select()
-    // This is the main fix.
+    // 1. Start building the query, now filtered by location
     let query = supabase
       .from('students')
-      .select('*', { count: 'exact' }); // Start with select to get filter methods
+      .select('*', { count: 'exact' })
+      .eq('location_id', req.locationId); // --- MODIFIED --- Base query is now location-aware
 
     // 2. Handle complex filters (faculty or unassigned)
     if (faculty_id) {
-      // Find all student IDs in batches taught by this faculty
+      // Find all student IDs in batches taught by this faculty *at this location*
       const { data: studentIds, error } = await supabase
         .from('batches')
         .select('batch_students!inner(student_id)')
-        .eq('faculty_id', faculty_id);
+        .eq('faculty_id', faculty_id)
+        .eq('location_id', req.locationId); // --- MODIFIED --- Filter batches by location
 
       if (error) throw error;
 
@@ -39,25 +46,23 @@ const getAllStudents = async (req, res) => {
       ];
 
       if (uniqueStudentIds.length === 0) {
-        // No students for this faculty, return empty
         return res.status(200).json({ students: [], count: 0 });
       }
 
-      // Use the correct .in() method
       query = query.in('id', uniqueStudentIds);
 
     } else if (unassigned === 'true') {
-      // Find all student IDs that are in *any* batch
+      // Find all student IDs *at this location* that are in *any* batch
       const { data: studentIdsInBatches, error } = await supabase
         .from('batch_students')
-        .select('student_id', { count: 'minimal' });
+        .select('student_id, students!inner(location_id)') // --- MODIFIED --- Join to students
+        .eq('students.location_id', req.locationId); // --- MODIFIED --- Filter by student location
 
       if (error) throw error;
 
       if (studentIdsInBatches && studentIdsInBatches.length > 0) {
         const uniqueStudentIds = [...new Set(studentIdsInBatches.map(s => s.student_id))];
         
-        // Use the correct .not() method
         query = query.not('id', 'in', `(${uniqueStudentIds.join(',')})`);
       }
     }
@@ -68,13 +73,12 @@ const getAllStudents = async (req, res) => {
     }
     
     if (fee_pending === 'true') {
-      // This combination of filters is correct
       query = query.not('remarks', 'ilike', '%full%paid%')
                    .filter('remarks', 'not.is', null)
                    .not('remarks', 'eq', '');
     }
 
-    // 4. Execute the final query (select() is already at the start)
+    // 4. Execute the final query
     const { data, error, count } = await query
       .order('name', { ascending: true })
       .range(from, to);
@@ -92,6 +96,11 @@ const getAllStudents = async (req, res) => {
  * Creates a new student record.
  */
 const createStudent = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+
   const { name, admission_number, phone_number, remarks } = req.body;
 
   if (!name || !admission_number) {
@@ -101,7 +110,13 @@ const createStudent = async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('students')
-      .insert([{ name, admission_number, phone_number, remarks }])
+      .insert([{ 
+        name, 
+        admission_number, 
+        phone_number, 
+        remarks,
+        location_id: req.locationId // --- MODIFIED --- Add the location ID
+      }])
       .select()
       .single(); 
 
@@ -110,8 +125,9 @@ const createStudent = async (req, res) => {
     await logActivity('created', `student ${data.name}`, req.user?.id || 'Admin');
     res.status(201).json(data);
   } catch (error) {
-    if (error.code === '23505') { 
-      return res.status(409).json({ error: `A student with admission number '${admission_number}' already exists.` });
+    // --- MODIFIED --- Updated error message for new composite key
+    if (error.code === '23505' && error.message.includes('students_admission_number_location_key')) { 
+      return res.status(409).json({ error: `A student with admission number '${admission_number}' already exists at this location.` });
     }
     res.status(500).json({ error: error.message });
   }
@@ -121,6 +137,8 @@ const createStudent = async (req, res) => {
  * Updates an existing student record.
  */
 const updateStudent = async (req, res) => {
+  // --- NO CHANGES NEEDED (functionally) ---
+  // This operates on a unique 'id' (UUID) and is implicitly location-safe.
   const { id } = req.params;
   const { name, admission_number, phone_number, remarks } = req.body;
 
@@ -138,8 +156,9 @@ const updateStudent = async (req, res) => {
     await logActivity('updated', `student ${data.name}`, req.user?.id || 'Admin');
     res.status(200).json(data);
   } catch (error) {
-    if (error.code === '23505') {
-      return res.status(409).json({ error: `A student with admission number '${admission_number}' already exists.` });
+    // --- MODIFIED --- Updated error message for new composite key
+    if (error.code === '23505' && error.message.includes('students_admission_number_location_key')) {
+      return res.status(409).json({ error: `A student with admission number '${admission_number}' already exists at this location.` });
     }
     res.status(500).json({ error: error.message });
   }
@@ -149,6 +168,8 @@ const updateStudent = async (req, res) => {
  * Deletes a student record.
  */
 const deleteStudent = async (req, res) => {
+  // --- NO CHANGES NEEDED ---
+  // This operates on a unique 'id' (UUID) and is implicitly location-safe.
   const { id } = req.params;
   try {
     const { error } = await supabase.from('students').delete().eq('id', id);
@@ -165,6 +186,8 @@ const deleteStudent = async (req, res) => {
  * Fetches all batches a specific student is enrolled in.
  */
 const getStudentBatches = async (req, res) => {
+  // --- NO CHANGES NEEDED ---
+  // This operates on a unique 'id' (student_id) and is implicitly location-safe.
   const { id } = req.params;
   try {
     const { data, error } = await supabase

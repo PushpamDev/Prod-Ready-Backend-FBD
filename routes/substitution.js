@@ -6,36 +6,43 @@ const {
     assignSubstitute, 
     mergeBatches, 
     createTemporarySubstitution,
-    getActiveSubstitutions,  // <-- NEW
-    updateSubstitution,        // <-- NEW
-    cancelSubstitution         // <-- NEW
+    getActiveSubstitutions,
+    updateSubstitution,
+    cancelSubstitution
 } = require('../controllers/substitutionController');
 
+// --- NEW --- Import middleware
+const auth = require('../middleware/auth');
+const admin = require('../middleware/admin');
 
 // === Temporary Substitution Routes ===
 
 // GET all active/upcoming temporary substitutions (for a dashboard)
-router.get('/temporary', getActiveSubstitutions);
+// --- MODIFIED --- Added auth and admin
+router.get('/temporary', auth, admin, getActiveSubstitutions);
 
 // POST a new temporary substitution record (non-destructive)
-router.post('/temporary', createTemporarySubstitution);
+// --- MODIFIED --- Added auth and admin
+router.post('/temporary', auth, admin, createTemporarySubstitution);
 
-// PUT (Update) an existing temporary substitution (e.g., change dates or faculty)
-// :id here refers to the ID of the 'faculty_substitutions' record
-router.put('/temporary/:id', updateSubstitution);
+// PUT (Update) an existing temporary substitution
+// --- MODIFIED --- Added auth and admin
+router.put('/temporary/:id', auth, admin, updateSubstitution);
 
 // DELETE (Cancel) a temporary substitution
-// :id here refers to the ID of the 'faculty_substitutions' record
-router.delete('/temporary/:id', cancelSubstitution);
+// --- MODIFIED --- Added auth and admin
+router.delete('/temporary/:id', auth, admin, cancelSubstitution);
 
 
 // === Permanent Action Routes ===
 
 // POST for PERMANENTLY re-assigning a batch to a new faculty
-router.post('/assign', assignSubstitute);
+// --- MODIFIED --- Added auth and admin
+router.post('/assign', auth, admin, assignSubstitute);
 
 // POST for PERMANENTLY merging two batches
-router.post('/merge', mergeBatches);
+// --- MODIFIED --- Added auth and admin
+router.post('/merge', auth, admin, mergeBatches);
 
 
 module.exports = router;

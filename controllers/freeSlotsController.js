@@ -1,6 +1,14 @@
 const supabase = require('../db.js');
 
+// Helper function to convert a time string (e.g., "14:30:00") into a comparable Date object.
+const parseTime = (timeStr) => new Date(`1970-01-01T${timeStr}Z`);
+
 const getFreeSlots = async (req, res) => {
+    // --- NEW --- This route MUST be protected by auth
+    if (!req.locationId) {
+        return res.status(401).json({ error: 'Authentication required with location.' });
+    }
+
     const { startDate, endDate, selectedFaculty, selectedSkill } = req.query;
 
     if (!startDate || !endDate) {
@@ -8,14 +16,16 @@ const getFreeSlots = async (req, res) => {
     }
 
     try {
-        // --- Step 1: Fetch all relevant data in parallel ---
+        // --- Step 1: Fetch all relevant data in parallel, filtered by location ---
 
-        // Fetch faculties, optionally filtered by the selected faculty
+        // Fetch faculties, filtered by location
         let facultyQuery = supabase.from('faculty').select(`
             id, name,
             skills ( id, name ),
             availability:faculty_availability ( day_of_week, start_time, end_time )
-        `);
+        `)
+        .eq('location_id', req.locationId); // --- MODIFIED --- Filter by location
+
         if (selectedFaculty) facultyQuery = facultyQuery.eq('id', selectedFaculty);
 
         const [
@@ -24,14 +34,18 @@ const getFreeSlots = async (req, res) => {
             { data: substitutions, error: substitutionsError }
         ] = await Promise.all([
             facultyQuery,
-            // Fetch only batches that are active within the selected date range
+            
+            // Fetch batches, filtered by location
             supabase.from('batches').select('id, name, start_date, end_date, start_time, end_time, days_of_week, faculty_id')
                 .lte('start_date', endDate)
-                .gte('end_date', startDate),
-            // Fetch only substitutions that are active within the selected date range
-            supabase.from('faculty_substitutions').select('*')
+                .gte('end_date', startDate)
+                .eq('location_id', req.locationId), // --- MODIFIED --- Filter by location
+
+            // Fetch substitutions, filtered by batch location
+            supabase.from('faculty_substitutions').select('*, batches!inner(location_id)') // --- MODIFIED --- Join to batches
                 .lte('start_date', endDate)
                 .gte('end_date', startDate)
+                .eq('batches.location_id', req.locationId) // --- MODIFIED --- Filter by batch location
         ]);
         
         if (facultiesError) throw facultiesError;
@@ -39,11 +53,13 @@ const getFreeSlots = async (req, res) => {
         if (substitutionsError) throw substitutionsError;
 
         // --- Step 2: Filter faculties by skill if selected ---
+        // (This logic is correct and unchanged)
         const filteredFaculties = selectedSkill
             ? faculties.filter(f => f.skills.some(s => s.id === selectedSkill))
             : faculties;
 
         // --- Step 3: Calculate free slots for each faculty ---
+        // (All logic below is now correct, as it operates on pre-filtered data)
         const results = [];
         const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
         const timeToMinutes = (timeStr) => {

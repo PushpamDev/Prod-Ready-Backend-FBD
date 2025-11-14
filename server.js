@@ -28,31 +28,37 @@ app.use(cors());
 app.use(express.json());
 
 // --- 1. API ROUTES ---
-app.use("/api/faculty", facultyRoutes);
-app.use("/api/availability", availabilityRoutes);
+// (All routes are now protected by `auth` except for `userRoutes`)
+
+app.use("/api/faculty", auth, facultyRoutes);
+app.use("/api/availability", auth, availabilityRoutes);
 app.use("/api/batches", auth, batchesRoutes);
-app.use("/api/view-batch", viewBatchRoutes);
-app.use("/api/skills", skillsRoutes);
-app.use("/api/free-slots", freeSlotsRoutes);
-app.use("/api/activities", activityRoutes);
-app.use("/api/users", userRoutes);
-app.use("/api/students", studentRoutes);
-app.use("/api/suggestions", suggestionRoutes);
-app.use('/api/attendance', attendanceRoutes);
-app.use("/api/announcements", announcementRoutes);
-app.use("/api/tickets", ticketRoutes);
-app.use("/api/chat", chatRoutes);
+app.use("/api/view-batch", auth, viewBatchRoutes); // --- MODIFIED ---
+app.use("/api/skills", auth, skillsRoutes); // --- MODIFIED ---
+app.use("/api/free-slots", auth, freeSlotsRoutes); // --- MODIFIED ---
+app.use("/api/activities", auth, activityRoutes); // --- MODIFIED ---
+
+// --- NO CHANGE ---
+// `userRoutes` is left public because it contains the `/login` route.
+// We secured all the *other* user routes inside the `userRoutes.js` file.
+app.use("/api/users", userRoutes); 
+
+app.use("/api/students", auth, studentRoutes); // --- MODIFIED ---
+app.use("/api/suggestions", auth, suggestionRoutes); // --- MODIFIED ---
+app.use('/api/attendance', auth, attendanceRoutes); // --- MODIFIED ---
+app.use("/api/announcements", auth, announcementRoutes); // --- MODIFIED ---
+app.use("/api/tickets", auth, ticketRoutes); // --- MODIFIED ---
+app.use("/api/chat", auth, chatRoutes); // --- MODIFIED ---
 app.use("/api/substitution", auth, substitutionRoutes);
 
 // --- 2. SERVE STATIC FRONTEND FILES (for Production) ---
-
-// UPDATED: The path now correctly points to the 'dist/spa' folder as defined in your Vite config.
+// (Your existing code looks correct)
 const frontendBuildPath = path.join(__dirname, '../Prod-Ready-Frontend-FBD-main/dist/spa');
 app.use(express.static(frontendBuildPath));
 
 
 // --- 3. SPA CATCH-ALL ROUTE (for Production) ---
-// This sends the main index.html file for any non-API, non-file request.
+// (Your existing code looks correct)
 app.get('*', (req, res) => {
   res.sendFile(path.join(frontendBuildPath, 'index.html'));
 });

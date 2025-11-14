@@ -5,7 +5,13 @@ const {
   setFacultyAvailability,
 } = require("../controllers/availabilityController");
 
-router.get("/faculty/:facultyId", getFacultyAvailability);
-router.post("/", setFacultyAvailability);
+// --- NEW --- Import your auth middleware
+const auth = require("../middleware/auth");
+
+// --- MODIFIED --- Added 'auth' middleware
+router.get("/faculty/:facultyId", auth, getFacultyAvailability);
+
+// --- MODIFIED --- Added 'auth' middleware
+router.post("/", auth, setFacultyAvailability);
 
 module.exports = router;

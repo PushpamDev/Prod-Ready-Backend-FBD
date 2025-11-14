@@ -19,6 +19,11 @@ const minutesToTime = (minutes) => {
 
 // --- Main Controller ---
 const suggestFaculty = async (req, res) => {
+    // --- NEW --- This route MUST be protected by auth
+    if (!req.locationId) {
+        return res.status(401).json({ error: 'Authentication required with location.' });
+    }
+
     // Now accepts optional startTime and endTime
     const { skillId, startDate, endDate, daysOfWeek, startTime, endTime } = req.body;
 
@@ -27,20 +32,42 @@ const suggestFaculty = async (req, res) => {
     }
 
     try {
-        // Step 1 & 2: Fetch relevant faculty and their potential batch conflicts (no changes here)
+        // Step 1: Fetch relevant faculty *at this location*
         const { data: facultyWithSkill, error: facultyError } = await supabase
-            .from('faculty_skills').select(`faculty (id, name, availability:faculty_availability (day_of_week, start_time, end_time))`).eq('skill_id', skillId);
+            .from('faculty_skills')
+            .select(`
+                faculty!inner(
+                    id, name,
+                    availability:faculty_availability (day_of_week, start_time, end_time)
+                )
+            `) // --- MODIFIED --- Use !inner to join and filter
+            .eq('skill_id', skillId)
+            .eq('faculty.location_id', req.locationId); // --- MODIFIED --- Filter by faculty's location
+
         if (facultyError) throw facultyError;
 
         const skilledFaculty = facultyWithSkill.map(item => item.faculty).filter(Boolean);
         if (skilledFaculty.length === 0) return res.json({ suggestions: [] });
 
         const facultyIds = skilledFaculty.map(f => f.id);
+
+        // Step 2: Fetch potential batch conflicts
+        // --- NO CHANGE NEEDED ---
+        // This query is now implicitly location-safe because `facultyIds`
+        // is already filtered by location from Step 1.
         const { data: potentiallyConflictingBatches, error: batchesError } = await supabase
-            .from('batches').select('start_time, end_time, days_of_week, faculty_id').in('faculty_id', facultyIds).lte('start_date', endDate).gte('end_date', startDate);
+            .from('batches')
+            .select('start_time, end_time, days_of_week, faculty_id')
+            .in('faculty_id', facultyIds)
+            .lte('start_date', endDate)
+            .gte('end_date', startDate);
+        
         if (batchesError) throw batchesError;
         
-        // Step 3: First, calculate all common available slots for each faculty
+        // Step 3: Calculate all common available slots for each faculty
+        // --- NO CHANGE NEEDED ---
+        // This is pure JS logic and is now correct because its input data
+        // (skilledFaculty and potentiallyConflictingBatches) is location-filtered.
         const facultyWithCommonSlots = skilledFaculty.map(faculty => {
             const dailySlots = daysOfWeek.map(day => {
                 const dayAvailability = faculty.availability.find(a => a.day_of_week.toLowerCase() === day.toLowerCase());
@@ -89,7 +116,8 @@ const suggestFaculty = async (req, res) => {
         }).filter(f => f.commonSlots.length > 0);
 
 
-        // Step 4: Categorize the faculty based on whether a specific time was requested
+        // Step 4: Categorize the faculty
+        // --- NO CHANGE NEEDED ---
         let suggestions;
         if (startTime && endTime) {
             const requestedStartMins = timeToMinutes(startTime);

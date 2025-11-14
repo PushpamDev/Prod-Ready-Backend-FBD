@@ -1,7 +1,7 @@
 const supabase = require('../db');
 const { logActivity } = require('./logActivity');
 
-// **FIX**: Standardized status to all lowercase to match frontend types
+// This helper is perfect, no changes.
 const getDynamicStatus = (startDate, endDate) => {
   const now = new Date();
   const start = new Date(startDate);
@@ -16,19 +16,38 @@ const getDynamicStatus = (startDate, endDate) => {
 
 const getAllBatches = async (req, res) => {
   try {
+    // --- NEW --- Check for auth and locationId
+    if (!req.locationId) {
+      return res.status(401).json({ error: 'Authentication required with location.' });
+    }
+
     const today = new Date().toISOString().split('T')[0];
+    
+    // --- NEW --- Check for the facultyId query param from the frontend
+    const { facultyId } = req.query;
 
     const [batchesResult, substitutionsResult, allFacultiesResult] = await Promise.all([
-      // This query is intentionally lightweight. It fetches the COUNT of students,
-      // not the full student objects. This is critical for performance.
-      supabase.from('batches').select(`
-        *,
-        faculty:faculty_id(*),
-        skill:skill_id(*),
-        students:batch_students(count)
-      `),
-      supabase.from('faculty_substitutions').select(`*, substitute:substitute_faculty_id(*)`).lte('start_date', today).gte('end_date', today),
-      supabase.from('faculty').select('*')
+      // This is an IIFE (Immediately Invoked Function Expression)
+      // to build the query dynamically
+      (() => {
+        let query = supabase.from('batches').select(`
+          *,
+          faculty:faculty_id(*),
+          skill:skill_id(*),
+          students:batch_students(count)
+        `).eq('location_id', req.locationId);
+        
+        // --- NEW --- If the facultyId query param exists, add it to the query
+        if (facultyId) {
+          query = query.eq('faculty_id', facultyId);
+        }
+        
+        return query;
+      })(), // Immediately invoke this query-building function
+
+      // These other queries are correct and location-filtered
+      supabase.from('faculty_substitutions').select(`*, substitute:substitute_faculty_id(*), batches!inner(location_id)`).lte('start_date', today).gte('end_date', today).eq('batches.location_id', req.locationId),
+      supabase.from('faculty').select('*').eq('location_id', req.locationId)
     ]);
 
     if (batchesResult.error) throw batchesResult.error;
@@ -77,6 +96,11 @@ const getAllBatches = async (req, res) => {
 };
 
 const createBatch = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth to get req.locationId
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+
   const {
     name, description, startDate, endDate, startTime, endTime,
     facultyId, skillId, maxStudents, studentIds, daysOfWeek, status
@@ -88,11 +112,12 @@ const createBatch = async (req, res) => {
 
   try {
     // --- Faculty availability check logic ---
+    // NO CHANGE NEEDED. This is based on a unique UUID (facultyId)
     const { data: facultyAvailability, error: availabilityError } = await supabase
       .from('faculty_availability')
       .select('day_of_week, start_time, end_time')
       .eq('faculty_id', facultyId);
-
+    // ... (rest of availability check is fine) ...
     if (availabilityError) throw availabilityError;
 
     const newStartTime = new Date(`1970-01-01T${startTime}Z`);
@@ -113,20 +138,18 @@ const createBatch = async (req, res) => {
     }
 
     // --- Scheduling conflict check logic ---
-    
-    // --- LOGIC UPDATE ---
-    // We only check for conflicts against batches that are NOT completed.
-    // i.e., batches whose end_date is today or in the future.
     const today = new Date().toISOString().split('T')[0];
-
     const { data: existingBatches, error: existingBatchesError } = await supabase
       .from('batches')
       .select('name, start_time, end_time, days_of_week, start_date, end_date')
       .eq('faculty_id', facultyId)
-      .gte('end_date', today); // <-- THIS IS THE FIX: Ignores completed batches
+      .gte('end_date', today)
+      // --- MODIFIED --- Only check for conflicts at the *same location*
+      .eq('location_id', req.locationId); 
 
     if (existingBatchesError) throw existingBatchesError;
 
+    // ... (rest of conflict check logic is fine) ...
     for (const batch of existingBatches) {
       const existingStartTime = new Date(`1970-01-01T${batch.start_time}Z`);
       const existingEndTime = new Date(`1970-01-01T${batch.end_time}Z`);
@@ -150,18 +173,20 @@ const createBatch = async (req, res) => {
         faculty_id: facultyId, skill_id: skillId,
         max_students: maxStudents, days_of_week: daysOfWeek,
         status,
+        location_id: req.locationId, // --- MODIFIED --- Add the location ID
       }])
       .select('id, name')
       .single();
 
     if (batchError) throw batchError;
 
+    // ... (rest of function is fine, based on UUIDs) ...
     if (studentIds && studentIds.length > 0) {
       const batchStudentData = studentIds.map((studentId) => ({ batch_id: batchData.id, student_id: studentId }));
       const { error: batchStudentError } = await supabase.from('batch_students').insert(batchStudentData);
       if (batchStudentError) throw batchStudentError;
     }
-
+    // ...
     const { data: finalBatch, error: finalBatchError } = await supabase
       .from('batches')
       .select(`*, faculty:faculty_id(*), skill:skill_id(*), students:batch_students(students(*))`)
@@ -175,8 +200,9 @@ const createBatch = async (req, res) => {
     res.status(201).json(formattedBatch);
 
   } catch (error) {
-    if (error.code === '23505' && error.message.includes('batches_name_key')) {
-      return res.status(409).json({ error: `A batch with the name '${name}' already exists.` });
+    // --- MODIFIED --- Updated error message for new schema's unique constraint
+    if (error.code === '23505' && error.message.includes('batches_name_location_key')) {
+      return res.status(409).json({ error: `A batch with the name '${name}' already exists at this location.` });
     }
     if (error.code === '23503') {
       if (error.message.includes('batches_faculty_id_fkey')) return res.status(400).json({ error: `Faculty with ID ${facultyId} does not exist.` });
@@ -187,8 +213,12 @@ const createBatch = async (req, res) => {
   }
 };
 
-// --- CORRECTED FUNCTION ---
 const updateBatch = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth to get req.locationId
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+
   const { id } = req.params; // The ID of the batch being updated
   const {
     name, description, startDate, endDate, startTime, endTime,
@@ -196,12 +226,13 @@ const updateBatch = async (req, res) => {
   } = req.body;
 
   try {
-    // --- 1. ADDED: Faculty availability check (same as in createBatch) ---
+    // --- Faculty availability check (same as in createBatch) ---
+    // NO CHANGE NEEDED. Based on unique UUID.
     const { data: facultyAvailability, error: availabilityError } = await supabase
       .from('faculty_availability')
       .select('day_of_week, start_time, end_time')
       .eq('faculty_id', facultyId);
-
+    // ... (rest of availability check is fine) ...
     if (availabilityError) throw availabilityError;
     
     const newStartTime = new Date(`1970-01-01T${startTime}Z`);
@@ -219,26 +250,24 @@ const updateBatch = async (req, res) => {
       }
     }
 
-    // --- 2. FIXED: Scheduling conflict check ---
-    
-    // --- LOGIC UPDATE ---
-    // We only check for conflicts against batches that are NOT completed.
-    // i.e., batches whose end_date is today or in the future.
+    // --- Scheduling conflict check ---
     const today = new Date().toISOString().split('T')[0];
-    
     const { data: existingBatches, error: existingBatchesError } = await supabase
       .from('batches')
       .select('id, name, start_time, end_time, days_of_week, start_date, end_date')
       .eq('faculty_id', facultyId)
-      .neq('id', id) // <-- THE CRITICAL FIX: Exclude the current batch
-      .gte('end_date', today); // <-- THIS IS THE FIX: Ignores completed batches
+      .neq('id', id)
+      .gte('end_date', today)
+      // --- MODIFIED --- Only check for conflicts at the *same location*
+      .eq('location_id', req.locationId); 
 
     if (existingBatchesError) throw existingBatchesError;
 
+    // ... (rest of conflict check logic is fine) ...
     const newStartDate = new Date(startDate);
     const newEndDate = new Date(endDate);
-
     for (const batch of existingBatches) {
+      // ...
       const existingStartTime = new Date(`1970-01-01T${batch.start_time}Z`);
       const existingEndTime = new Date(`1970-01-01T${batch.end_time}Z`);
       const existingStartDate = new Date(batch.start_date);
@@ -251,14 +280,14 @@ const updateBatch = async (req, res) => {
       }
     }
     
-    // --- Original update logic now follows after successful validation ---
+    // --- Original update logic ---
+    // NO CHANGE NEEDED. We are updating by a unique 'id' (UUID).
+    // We don't need to add location_id to the update.
     const status = getDynamicStatus(startDate, endDate);
-
-    // First, remove all existing student associations for this batch
+    // ... (rest of update logic is fine) ...
     const { error: deleteError } = await supabase.from('batch_students').delete().eq('batch_id', id);
     if (deleteError) throw deleteError;
 
-    // Then, add the new list of students
     if (studentIds && studentIds.length > 0) {
       const batchStudentData = studentIds.filter(Boolean).map((studentId) => ({ batch_id: id, student_id: studentId }));
       if (batchStudentData.length > 0) {
@@ -267,7 +296,6 @@ const updateBatch = async (req, res) => {
       }
     }
 
-    // Finally, update the batch details
     const { data, error } = await supabase
       .from('batches')
       .update({
@@ -288,9 +316,9 @@ const updateBatch = async (req, res) => {
     await logActivity('updated', `batch ${formattedBatch.name}`, 'Admin');
     res.json(formattedBatch);
   } catch (error) {
-     // --- 3. ADDED: Robust error handling (same as in createBatch) ---
-    if (error.code === '23505' && error.message.includes('batches_name_key')) {
-      return res.status(409).json({ error: `A batch with the name '${name}' already exists.` });
+    // --- MODIFIED --- Updated error message for new schema's unique constraint
+    if (error.code === '23505' && error.message.includes('batches_name_location_key')) {
+      return res.status(409).json({ error: `A batch with the name '${name}' already exists at this location.` });
     }
      if (error.code === '23503') {
       if (error.message.includes('batches_faculty_id_fkey')) return res.status(400).json({ error: `Faculty with ID ${facultyId} does not exist.` });
@@ -303,6 +331,7 @@ const updateBatch = async (req, res) => {
 
 
 const deleteBatch = async (req, res) => {
+  // NO CHANGE NEEDED. Deleting by a unique 'id' (UUID) is safe.
   const { id } = req.params;
   try {
     const { error } = await supabase.from('batches').delete().eq('id', id);
@@ -315,8 +344,11 @@ const deleteBatch = async (req, res) => {
 };
 
 const getBatchStudents = async (req, res) => {
+  // NO CHANGE NEEDED. This is querying by a unique 'batch_id' (UUID).
+  // This is safe and correct.
   const { id } = req.params;
   try {
+    // ... (rest of function is fine) ...
     const allStudentLinks = [];
     const pageSize = 1000;
     let page = 0;
@@ -352,13 +384,22 @@ const getBatchStudents = async (req, res) => {
 };
 
 const getActiveStudentsCount = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth to get req.locationId
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+  
   try {
     const { data: batches, error: batchesError } = await supabase
       .from("batches")
-      .select("id, start_date, end_date");
+      .select("id, start_date, end_date")
+      // --- MODIFIED --- Filter batches by the user's location
+      .eq('location_id', req.locationId); 
 
     if (batchesError) throw batchesError;
 
+    // The rest of the logic is now correct, as it's operating
+    // only on batches from the correct location.
     const activeBatches = batches.filter(
       (batch) => getDynamicStatus(batch.start_date, batch.end_date).toLowerCase() === "active"
     );

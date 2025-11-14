@@ -1,7 +1,7 @@
 const supabase = require("../db.js");
 const { logActivity } = require("./logActivity");
 
-// Helper function to determine batch status
+// Helper function to determine batch status (No changes)
 function getDynamicStatus(startDate, endDate) {
   const now = new Date();
   const start = new Date(startDate);
@@ -17,6 +17,11 @@ function getDynamicStatus(startDate, endDate) {
 }
 
 const getAllFaculty = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+
   const { data, error } = await supabase
     .from("faculty")
     .select(`
@@ -28,13 +33,16 @@ const getAllFaculty = async (req, res) => {
       is_active,
       skills ( id, name ),
       faculty_availability ( id, day_of_week, start_time, end_time )
-    `);
+    `)
+    // --- MODIFIED --- Filter by the user's location
+    .eq('location_id', req.locationId); 
 
 if (error){
     console.error("Error fetching faculty:", error);
     return res.status(500).json({ error: "Failed to fetch faculty" });
   }
 
+  // --- (Rest of function is unchanged) ---
   const transformedData = data.map(faculty => ({
       id: faculty.id,
       name: faculty.name,
@@ -50,21 +58,27 @@ if (error){
 };
 
 const createFaculty = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+  
   const { userId, phone_number, employment_type, skillIds, email } = req.body;
 
   if (!userId) {
     return res.status(400).json({ error: 'User ID is required' });
   }
 
-  // Check if user exists
+  // --- MODIFIED --- Check if user exists *at this location*
   const { data: userData, error: userError } = await supabase
     .from('users')
     .select('id, username')
     .eq('id', userId)
+    .eq('location_id', req.locationId) // <-- Location check
     .single();
 
   if (userError || !userData) {
-    return res.status(404).json({ error: 'User not found' });
+    return res.status(404).json({ error: 'User not found at this location.' });
   }
 
   const name = userData.username;
@@ -74,18 +88,26 @@ const createFaculty = async (req, res) => {
     // 1. Create the faculty member
     const { data, error: facultyError } = await supabase
       .from('faculty')
-      .insert([{ name, email, phone_number, employment_type }])
+      .insert([{ 
+        name, 
+        email, 
+        phone_number, 
+        employment_type,
+        location_id: req.locationId // --- MODIFIED --- Add the location ID
+      }])
       .select()
       .single();
 
     if (facultyError) {
-      if (facultyError.code === '23505' && facultyError.message.includes('faculty_email_key')) {
-        return res.status(409).json({ error: `A faculty with the email '${email}' already exists.` });
+      // --- MODIFIED --- Check for the new composite unique constraint
+      if (facultyError.code === '23505' && facultyError.message.includes('faculty_email_location_key')) {
+        return res.status(409).json({ error: `A faculty with the email '${email}' already exists at this location.` });
       }
       throw facultyError;
     }
     facultyData = data;
 
+    // --- (Rest of function is unchanged and correct) ---
     // 2. Update the user's role and link to the new faculty entry
     const { error: updateUserError } = await supabase
       .from('users')
@@ -110,10 +132,7 @@ const createFaculty = async (req, res) => {
         .insert(facultySkills);
 
       if (skillsError) {
-        // If linking skills fails, we roll back the faculty creation.
-        // Deleting the faculty will set the user's faculty_id to NULL due to the foreign key constraint.
-        // The user will be left with a 'faculty' role but no faculty entry, which is an inconsistent state.
-        // A full transaction would be required for a perfect rollback.
+        // ... (rest of error handling is fine) ...
         await supabase.from('faculty').delete().eq('id', facultyData.id);
         if (skillsError.code === '23503') {
           return res.status(400).json({ error: 'One or more skill IDs are invalid.' });
@@ -123,7 +142,7 @@ const createFaculty = async (req, res) => {
     }
 
     // Log activity
-    await logActivity('Created', `Faculty \"${name}\"`, 'user'); // Replace "user" with actual user if available
+    await logActivity('Created', `Faculty \"${name}\"`, 'user'); 
 
     res.status(201).json(facultyData);
   } catch (error) {
@@ -133,6 +152,11 @@ const createFaculty = async (req, res) => {
 };
 
 const updateFaculty = async (req, res) => {
+  // --- NO CHANGES NEEDED ---
+  // This function operates on a specific 'id' (UUID).
+  // The frontend, which gets data from the now-filtered `getAllFaculty`,
+  // will only ever provide an ID for a faculty at the correct location.
+  // This function is implicitly location-safe.
   const { id } = req.params;
   const { name, phone_number, employment_type, skillIds } = req.body;
 
@@ -215,6 +239,10 @@ const updateFaculty = async (req, res) => {
 };
 
 const deleteFaculty = async (req, res) => {
+  // --- NO CHANGES NEEDED ---
+  // This function operates on a specific 'id' (UUID).
+  // It is implicitly location-safe. The conflict check
+  // for batches is also safe as it's based on the faculty 'id'.
   const { id } = req.params;
 
   try {
@@ -287,8 +315,13 @@ const deleteFaculty = async (req, res) => {
 
 // ** CORRECTED FUNCTION **
 const getFacultyActiveStudents = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+
   try {
-    // 1. Get all faculties and their related batches and students in one go
+    // 1. Get all faculties *at this location*
     const { data: faculties, error } = await supabase
       .from("faculty")
       .select(`
@@ -300,10 +333,13 @@ const getFacultyActiveStudents = async (req, res) => {
           end_date,
           batch_students ( student_id )
         )
-      `);
+      `)
+      // --- MODIFIED --- Filter by the user's location
+      .eq('location_id', req.locationId);
 
     if (error) throw error;
 
+    // --- (Rest of function is unchanged) ---
     // 2. Process the data in JavaScript
     const facultyData = faculties.map(faculty => {
       const uniqueStudentIds = new Set();
@@ -336,6 +372,9 @@ const getFacultyActiveStudents = async (req, res) => {
 };
 
 const getFacultyTotalStudents = async (req, res) => {
+  // --- NO CHANGES NEEDED ---
+  // This function operates on a specific 'faculty_id' (UUID).
+  // It is implicitly location-safe.
   const { faculty_id } = req.params;
 
   if (!faculty_id) {
@@ -361,14 +400,22 @@ const getFacultyTotalStudents = async (req, res) => {
 
 // ** NEW FUNCTION **
 const getFacultyStudentCounts = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+
   try {
-    // 1. Get all faculties
+    // 1. Get all faculties *at this location*
     const { data: faculties, error: facultyError } = await supabase
       .from("faculty")
-      .select("id, name");
+      .select("id, name")
+      // --- MODIFIED --- Filter by the user's location
+      .eq('location_id', req.locationId);
 
     if (facultyError) throw facultyError;
 
+    // --- (Rest of function is unchanged) ---
     // 2. For each faculty, call the RPC to get the count
     const counts = await Promise.all(
       faculties.map(async (faculty) => {

@@ -1,4 +1,4 @@
-const supabase = require('../db');
+const supabase = require('../db.js');
 const { logActivity } = require("./logActivity");
 
 // Centralized error handler
@@ -13,8 +13,8 @@ const handleSupabaseError = (res, error, context) => {
   return res.status(500).json({ error: `Failed to ${context.toLowerCase()}` });
 };
 
-// --- REVERTED TO ORIGINAL ---
-// This function no longer uses req.user, as requested.
+// --- MODIFIED ---
+// Now automatically adds location_id based on the student
 const createTicket = async (req, res) => {
   const { title, description, student_id, priority, category } = req.body;
 
@@ -23,6 +23,20 @@ const createTicket = async (req, res) => {
   }
 
   try {
+    // --- NEW ---
+    // 1. Find the student to get their location
+    const { data: student, error: studentError } = await supabase
+      .from('students')
+      .select('location_id')
+      .eq('id', student_id)
+      .single();
+
+    if (studentError || !student) {
+      return res.status(404).json({ error: 'Student not found.' });
+    }
+    // --- END NEW ---
+
+    // 2. Insert the ticket with the student's location
     const { data: ticket, error } = await supabase
       .from('tickets')
       .insert([{ 
@@ -31,7 +45,8 @@ const createTicket = async (req, res) => {
         student_id,
         priority: priority || 'Low',
         category: category || 'Other',
-        status: 'Open' 
+        status: 'Open',
+        location_id: student.location_id // --- MODIFIED ---
       }])
       .select()
       .single();
@@ -47,9 +62,14 @@ const createTicket = async (req, res) => {
   }
 };
 
-// --- NO CHANGES NEEDED ---
-// This function already has excellent pagination.
+// --- MODIFIED ---
+// Now filtered by the logged-in admin's location
 const getAllTickets = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+
   try {
     const { status, search, category, page = 1, limit = 15 } = req.query;
     const offset = (page - 1) * limit;
@@ -61,7 +81,8 @@ const getAllTickets = async (req, res) => {
         student:students(id, name),
         assignee:users(id, username),
         assignee_id
-      `, { count: 'exact' });
+      `, { count: 'exact' })
+      .eq('location_id', req.locationId); // --- MODIFIED --- Filter by location
 
     if (status && status !== 'All') {
       query = query.eq('status', status);
@@ -96,6 +117,8 @@ const getAllTickets = async (req, res) => {
 };
 
 const getTicketById = async (req, res) => {
+  // --- NO CHANGES NEEDED ---
+  // Implicitly location-safe, as `getAllTickets` is filtered.
   const { id } = req.params;
   try {
     const { data: ticket, error } = await supabase
@@ -117,9 +140,11 @@ const getTicketById = async (req, res) => {
 };
 
 const updateTicket = async (req, res) => {
+  // --- NO CHANGES NEEDED ---
+  // Implicitly location-safe, operates on a unique 'id'.
   const { id } = req.params;
   const { assignee_id, status } = req.body;
-
+  // ... (rest of function is unchanged) ...
   const updatePayload = {};
 
   if (status) {
@@ -180,6 +205,8 @@ const updateTicket = async (req, res) => {
 };
 
 const deleteTicket = async (req, res) => {
+  // --- NO CHANGES NEEDED ---
+  // Implicitly location-safe, operates on a unique 'id'.
   const { id } = req.params;
   try {
     const { data: ticket, error } = await supabase.from('tickets').delete().eq('id', id).select().single();
@@ -192,9 +219,14 @@ const deleteTicket = async (req, res) => {
   }
 };
 
-// --- CORRECTED FUNCTION ---
-// Added a pagination loop to ensure all admins are always fetched.
+// --- MODIFIED ---
+// Now filtered by the logged-in admin's location
 const getAdmins = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+
   try {
     const allAdmins = [];
     const pageSize = 1000;
@@ -209,6 +241,7 @@ const getAdmins = async (req, res) => {
         .from('users')
         .select('id, username')
         .eq('role', 'admin')
+        .eq('location_id', req.locationId) // --- MODIFIED --- Filter by location
         .range(from, to);
 
       if (error) return handleSupabaseError(res, error, 'fetching admins');
@@ -232,10 +265,22 @@ const getAdmins = async (req, res) => {
 };
 
 const getTicketCategories = async (req, res) => {
+  // --- NEW --- This route MUST be protected by auth
+  if (!req.locationId) {
+    return res.status(401).json({ error: 'Authentication required with location.' });
+  }
+  
   try {
+    // --- MODIFIED ---
+    // We now pass the location_id to the RPC function.
+    // NOTE: You MUST update your SQL function `get_unique_ticket_categories`
+    // to accept a `p_location_id INT` argument and add a
+    // `WHERE location_id = p_location_id` clause.
     const { data, error } = await supabase
-      .rpc('get_unique_ticket_categories')
-      .limit(2000); // Added a generous limit as a safeguard for RPC calls.
+      .rpc('get_unique_ticket_categories', {
+        p_location_id: req.locationId 
+      })
+      .limit(2000); 
       
     if (error) return handleSupabaseError(res, error, 'fetching ticket categories');
     const categories = data.map(item => item.category);
@@ -247,6 +292,8 @@ const getTicketCategories = async (req, res) => {
 };
 
 const postChatMessage = async (req, res) => {
+    // --- NO CHANGES NEEDED ---
+    // Implicitly location-safe, operates on a unique 'ticketId'.
     const { ticketId } = req.params;
     const { message } = req.body;
     const sender_user_id = req.user.id; 
@@ -272,7 +319,6 @@ const postChatMessage = async (req, res) => {
         res.status(500).json({ error: "Internal server error" });
     }
 };
-
 
 module.exports = {
   createTicket,
