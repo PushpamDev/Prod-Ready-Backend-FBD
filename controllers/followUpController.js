@@ -1,10 +1,9 @@
-// controllers/followUpController.js
 const supabase = require('../db');
 const { format } = require('date-fns');
 
 /**
  * @description Get the task list for the main follow-up dashboard.
- * [UPDATED] Now correctly filters the 'Today' tab.
+ * [UPDATED] Filters 'Today', searches by Admission Number, and automatically fetches new columns.
  */
 exports.getFollowUpTasks = async (req, res) => {
   const { 
@@ -18,20 +17,21 @@ exports.getFollowUpTasks = async (req, res) => {
   } = req.query;
 
   try {
+    // 1. Select * from the view. 
+    // Since we updated the SQL view, this '*' now includes 'admission_number' and 'last_log_created_at'
     let query = supabase
       .from('v_follow_up_task_list')
       .select('*');
 
     const today = format(new Date(), 'yyyy-MM-dd');
 
-    // --- THIS IS THE FIX ---
-
-    // A. Date Filter Tabs
+    // 2. Date Filter Tabs
     if (dateFilter === 'today') {
+      // Logic A: The task is officially scheduled for today
       query = query.eq('next_task_due_date', today);
       
-      // AND (the last log was created before today OR there is no log at all)
-      // This prevents students who were already contacted today from appearing.
+      // Logic B: HIDE the task if a log was already created "Today".
+      // We check if 'last_log_created_at' is NULL (never called) OR was created BEFORE today (yesterday or older).
       query = query.or(`last_log_created_at.is.null,last_log_created_at.lt.${today}`);
       
     } else if (dateFilter === 'overdue') {
@@ -40,14 +40,13 @@ exports.getFollowUpTasks = async (req, res) => {
       query = query.gt('next_task_due_date', today);
     }
 
-    // --- END OF FIX ---
-
-    // B. Search Term
+    // 3. Search Term (Includes Admission Number Search)
     if (searchTerm) {
-      query = query.or(`student_name.ilike.%${searchTerm}%,student_phone.ilike.%${searchTerm}%`);
+      // This works because we added admission_number to the view
+      query = query.or(`student_name.ilike.%${searchTerm}%,student_phone.ilike.%${searchTerm}%,admission_number.ilike.%${searchTerm}%`);
     }
 
-    // C. Advanced Filters
+    // 4. Advanced Filters
     if (batchName) {
       query = query.eq('batch_name', batchName);
     }
@@ -58,7 +57,7 @@ exports.getFollowUpTasks = async (req, res) => {
       query = query.gte('total_due_amount', dueAmountMin);
     }
     
-    // D. Custom Date Range (if dateFilter is not set to a tab)
+    // 5. Custom Date Range
     if (startDate) {
       query = query.gte('next_task_due_date', startDate);
     }
@@ -66,7 +65,7 @@ exports.getFollowUpTasks = async (req, res) => {
       query = query.lte('next_task_due_date', endDate);
     }
 
-    // 3. Execute the query
+    // 6. Execute
     const { data, error } = await query.order('next_task_due_date', { ascending: true });
 
     if (error) throw error;
@@ -79,9 +78,6 @@ exports.getFollowUpTasks = async (req, res) => {
 };
 
 
-// ... (rest of your file: createFollowUpLog, getFollowUpHistoryForAdmission) ...
-// (Make sure to paste your other functions here)
-
 exports.createFollowUpLog = async (req, res) => {
   const {
     admission_id,
@@ -91,13 +87,11 @@ exports.createFollowUpLog = async (req, res) => {
     lead_type            // 'Hot', 'Warm', 'Cold'
   } = req.body;
 
-  const user_id = req.user?.id; // Assumes auth middleware sets req.user
+  const user_id = req.user?.id; 
 
   if (!admission_id || !user_id) {
     return res.status(400).json({ error: 'admission_id and user_id are required.' });
   }
-  // Note: We allow next_follow_up_date to be null
-  // This signifies the task is "completed" without scheduling a new one.
 
   try {
     const { data, error } = await supabase
@@ -106,8 +100,8 @@ exports.createFollowUpLog = async (req, res) => {
         admission_id,
         user_id,
         notes: notes || '',
-        follow_up_date: new Date().toISOString(), // This is the log date (NOW)
-        next_follow_up_date: next_follow_up_date || null, // Next task due date
+        follow_up_date: new Date().toISOString(), 
+        next_follow_up_date: next_follow_up_date || null,
         type: type || 'Call',
         lead_type: lead_type || null
       })
@@ -135,15 +129,14 @@ exports.getFollowUpHistoryForAdmission = async (req, res) => {
 
   try {
     const { data, error } = await supabase
-      .from('follow_up_details') // Using our view
-      .select('*')
+      .from('follow_up_details') 
+      .select('*') // Includes 'admission_number' from the updated view
       .eq('admission_id', admissionId)
-      .order('log_date', { ascending: false }); // Show newest logs first
+      .order('log_date', { ascending: false });
 
     if (error) throw error;
 
     if (!data) {
-      // Return empty array instead of 404, it's not an error
       return res.status(200).json([]);
     }
 

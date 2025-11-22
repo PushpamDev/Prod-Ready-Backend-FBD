@@ -176,7 +176,7 @@ exports.recordPayment = async (req, res) => {
                 payment_date,
                 method,
                 receipt_number: newReceiptNumber,
-                notes,
+                notes, // This saves the cheque/transaction number
                 created_by: user_id
             })
             .select('id') 
@@ -206,6 +206,7 @@ exports.recordPayment = async (req, res) => {
 
 /**
  * @description Get details for the Accounts detail page.
+ * [UPDATED] Now includes 'admission_number' for the UI.
  */
 exports.getAccountDetails = async (req, res) => {
   const { admissionId } = req.params;
@@ -218,8 +219,9 @@ exports.getAccountDetails = async (req, res) => {
       paymentsResult,
       coursesResult
     ] = await Promise.all([
+      // 1. Fetching admission_number along with other details
       supabase.from('v_admission_financial_summary')
-              .select('student_name, total_payable_amount, total_paid, remaining_due, student_phone_number, branch') 
+              .select('student_name, admission_number, total_payable_amount, total_paid, remaining_due, student_phone_number, branch') 
               .eq('admission_id', admissionId)
               .single(),
       supabase.from('v_installment_status') 
@@ -243,6 +245,8 @@ exports.getAccountDetails = async (req, res) => {
     const financials = financialsResult.data;
 
     const responseData = {
+      // 2. Mapping it to the response
+      admission_number: financials.admission_number,
       name: financials.student_name,
       phones: [financials.student_phone_number],
       branch: financials.branch,
@@ -272,8 +276,7 @@ exports.getAccountDetails = async (req, res) => {
 
 
 /**
- * @description [UPDATED] Get data needed to generate a receipt for a specific payment.
- * Now joins to 'batches' to get the *actual* assigned batch.
+ * @description Get data needed to generate a receipt for a specific payment.
  */
 exports.getReceiptData = async (req, res) => {
     const { paymentId } = req.params;
@@ -319,11 +322,9 @@ exports.getReceiptData = async (req, res) => {
         const studentData = admissionData.students;
         const coursesData = admissionData.admission_courses;
 
-        // --- NEW: Get actual batch names ---
         const batchData = studentData?.batch_students || [];
         const actualBatches = batchData.map(bs => bs.batches?.name).filter(Boolean);
         const batchString = actualBatches.length > 0 ? actualBatches.join(', ') : 'Not Allotted';
-        // --- End New ---
 
         let gstBreakdown = { cgst: 0, sgst: 0, totalGst: 0, rate: 0 };
         let taxableAmount = payment.amount_paid;
@@ -346,13 +347,15 @@ exports.getReceiptData = async (req, res) => {
             amount_paid: payment.amount_paid,
             amount_in_words: "Placeholder - Implement amount to words function",
             
+            notes: payment.notes, 
+            
             admission_id: admissionData.id, 
             student_name: studentData?.name,
             student_phone: studentData?.phone_number,
             father_name: admissionData.father_name,
             address: admissionData.current_address,
             id_card_no: studentData?.admission_number, 
-            admission_batch: batchString, // <-- FIXED
+            admission_batch: batchString,
             
             admission_date: admissionData.date_of_admission,
             courses: coursesData?.map(c => c.courses?.name).join(', ') || 'N/A',
