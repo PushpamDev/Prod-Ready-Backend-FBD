@@ -18,6 +18,12 @@ const viewBatchRoutes = require("./routes/viewBatch");
 const announcementRoutes = require("./routes/announcements");
 const ticketRoutes = require("./routes/ticketManagementRoutes");
 const chatRoutes = require("./routes/chatRoutes");
+const courseRoutes = require("./routes/courseRoutes");
+const admissionRoutes = require("./routes/admissionRoutes");
+const followUpRoutes = require("./routes/followUpRoutes");
+const certificateRoutes = require("./routes/certificateRoutes");
+const dashboardRoutes = require('./routes/dashboardRoutes');
+const accountsRoutes = require('./routes/accountsRoutes');
 const substitutionRoutes = require("./routes/substitution");
 
 const app = express();
@@ -33,24 +39,20 @@ app.use(express.json());
 app.use("/api/faculty", auth, facultyRoutes);
 app.use("/api/availability", auth, availabilityRoutes);
 app.use("/api/batches", auth, batchesRoutes);
-app.use("/api/view-batch", auth, viewBatchRoutes); // --- MODIFIED ---
-app.use("/api/skills", auth, skillsRoutes); // --- MODIFIED ---
-app.use("/api/free-slots", auth, freeSlotsRoutes); // --- MODIFIED ---
-app.use("/api/activities", auth, activityRoutes); // --- MODIFIED ---
-
-// --- NO CHANGE ---
-// `userRoutes` is left public because it contains the `/login` route.
-// We secured all the *other* user routes inside the `userRoutes.js` file.
-app.use("/api/users", userRoutes); 
-
-app.use("/api/students", auth, studentRoutes); // --- MODIFIED ---
-app.use("/api/suggestions", auth, suggestionRoutes); // --- MODIFIED ---
-app.use('/api/attendance', auth, attendanceRoutes); // --- MODIFIED ---
-app.use("/api/announcements", auth, announcementRoutes); // --- MODIFIED ---
-app.use("/api/tickets", auth, ticketRoutes); // --- MODIFIED ---
-app.use("/api/chat", auth, chatRoutes); // --- MODIFIED ---
-app.use("/api/substitution", auth, substitutionRoutes);
-
+app.use("/api/view-batch", viewBatchRoutes);
+app.use("/api/skills", skillsRoutes);
+app.use("/api/free-slots", freeSlotsRoutes);
+app.use("/api/activities", activityRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/students", studentRoutes);
+app.use("/api/suggestions", suggestionRoutes);
+app.use('/api/attendance', attendanceRoutes);
+app.use("/api/announcements", announcementRoutes);
+app.use("/api/tickets", ticketRoutes);
+app.use("/api/chat", chatRoutes);
+app.use("/api/courses", auth, courseRoutes);
+app.use("/api/admissions", auth, admissionRoutes);
+app.use("/api/follow-ups", auth, followUpRoutes);
 // --- 2. SERVE STATIC FRONTEND FILES (for Production) ---
 // (Your existing code looks correct)
 const frontendBuildPath = path.join(__dirname, '../Prod-Ready-Frontend-FBD-main/dist/spa');
