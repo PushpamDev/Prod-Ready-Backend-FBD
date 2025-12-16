@@ -50,17 +50,18 @@ app.use('/api/attendance', attendanceRoutes);
 app.use("/api/announcements", announcementRoutes);
 app.use("/api/tickets", ticketRoutes);
 app.use("/api/chat", chatRoutes);
-app.use("/api/courses", auth, courseRoutes);
-app.use("/api/admissions", auth, admissionRoutes);
+app.use("/api/courses", courseRoutes);
+app.use("/api/admissions", admissionRoutes);
+app.use("/api/dashboard", auth, dashboardRoutes);
+app.use("/api/accounts", auth, accountsRoutes);
+app.use("/api/certificates", certificateRoutes);
 app.use("/api/follow-ups", auth, followUpRoutes);
 // --- 2. SERVE STATIC FRONTEND FILES (for Production) ---
-// (Your existing code looks correct)
 const frontendBuildPath = path.join(__dirname, '../Prod-Ready-Frontend-FBD-main/dist/spa');
 app.use(express.static(frontendBuildPath));
 
 
 // --- 3. SPA CATCH-ALL ROUTE (for Production) ---
-// (Your existing code looks correct)
 app.get('*', (req, res) => {
   res.sendFile(path.join(frontendBuildPath, 'index.html'));
 });
