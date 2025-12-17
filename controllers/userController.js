@@ -203,10 +203,66 @@ const assignRole = async (req, res) => {
   res.status(200).json(data);
 };
 
+// =======================================================
+// --- NEW STUDENT LOGIN (Add this function) ---
+// =======================================================
+const studentLogin = async (req, res) => {
+  const { admission_number, phone_number } = req.body;
+
+  if (!admission_number || !phone_number) {
+    return res.status(400).json({ error: 'Admission Number and Phone Number are required.' });
+  }
+
+  try {
+    // 1. Find the student in the 'students' table
+    const { data: student, error } = await supabase
+      .from('students')
+      .select('id, name, phone_number, admission_number, location_id') 
+      .eq('admission_number', admission_number)
+      .eq('phone_number', phone_number)
+      .single();
+
+    if (error || !student) {
+      return res.status(401).json({ error: 'Invalid credentials. Please check your Admission ID and Registered Mobile Number.' });
+    }
+
+    // 2. Generate Token
+    // We explicitly set role: 'student' so auth.js knows to look in the students table
+    const token = jwt.sign(
+      { 
+        id: student.id, 
+        role: 'student', // <--- IMPORTANT: This tells auth.js it's a student
+        name: student.name,
+        location_id: student.location_id 
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' } // Students get a longer session
+    );
+
+    // 3. Return Token & User Data
+    res.status(200).json({
+      message: 'Login successful',
+      token,
+      user: {
+        id: student.id,
+        name: student.name,
+        role: 'student',
+        admission_number: student.admission_number,
+        phone_number: student.phone_number,
+        location_id: student.location_id
+      }
+    });
+
+  } catch (err) {
+    console.error('Student Login Error:', err);
+    res.status(500).json({ error: 'An unexpected error occurred during login.' });
+  }
+};
 module.exports = {
   createUser,
   login,
   getAllUsers,
   assignRole,
   getAdmins,
+  studentLogin,
 };
