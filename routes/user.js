@@ -36,5 +36,5 @@ router.patch("/assign-role", auth, admin, assignRole);
 // It needs 'auth' to filter by location
 router.get("/admins", auth, getAdmins);
 
-router.post('/auth/student/login', auth, studentLogin);
+router.post('/auth/student/login', studentLogin);
 module.exports = router;
