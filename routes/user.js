@@ -6,6 +6,7 @@ const {
   assignRole,
   login,
   getAdmins,
+  studentLogin,
 } = require("../controllers/userController");
 
 // --- NEW --- Import middleware
@@ -35,4 +36,5 @@ router.patch("/assign-role", auth, admin, assignRole);
 // It needs 'auth' to filter by location
 router.get("/admins", auth, getAdmins);
 
+router.post('/auth/student/login', auth, studentLogin);
 module.exports = router;
