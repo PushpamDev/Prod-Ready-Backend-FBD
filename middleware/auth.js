@@ -26,7 +26,10 @@ const auth = async (req, res, next) => {
       if (error || !student) {
         throw new Error('Student not found');
       }
-
+      // --- ADD THIS LINE ---
+      // Since the DB doesn't have it, we manually add it to the object
+      student.role = 'student'; 
+      // ---------------------
       req.user = student;
       req.userType = 'student';
       req.locationId = student.location_id; 

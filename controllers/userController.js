@@ -113,10 +113,19 @@ const login = async (req, res) => {
     const token = jwt.sign(
       tokenPayload,
       process.env.JWT_SECRET,
-      { expiresIn: "1h" }
+      { expiresIn: "64h" }
     );
 
-    res.status(200).json({ token }); // Send only the token, as AuthContext expects
+    res.status(200).json({ 
+      token,
+      user: {
+        userId: user.id, // Matching your token payload logic
+        username: user.username,
+        role: user.role,
+        locationId: user.location_id,
+        locationName: locationName
+      }
+    }); 
   } catch (error) {
     console.error("Login error:", error);
     res.status(500).json({ error: "Internal server error" });
