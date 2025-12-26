@@ -7,64 +7,41 @@ const { logActivity } = require('./logActivity');
  */
 const getAllStudents = async (req, res) => {
   if (!req.locationId) {
-    return res.status(401).json({ error: 'Authentication required with location.' });
+    return res.status(401).json({ error: 'Authentication required.' });
   }
 
-  const { search, faculty_id, unassigned, fee_pending, page = 1, limit = 200 } = req.query;
+  const { search, page = 1, limit = 200 } = req.query;
   const from = (page - 1) * limit;
   const to = from + limit - 1;
 
   try {
-    // 1. Fetch Students (Simple query to avoid the PGRST200 error)
+    // 1. Query the NEW View directly
     let query = supabase
-      .from('students')
+      .from('v_students_with_followup')
       .select('*', { count: 'exact' })
       .eq('location_id', req.locationId);
-
-    // ... (Your existing faculty_id and unassigned filters stay here) ...
 
     if (search) {
       query = query.or(`name.ilike.%${search}%,admission_number.ilike.%${search}%`);
     }
 
-    const { data: students, error: studentError, count } = await query
+    const { data: students, error, count } = await query
       .order('name', { ascending: true })
       .range(from, to);
 
-    if (studentError) throw studentError;
+    if (error) throw error;
 
-    // 2. Fetch Follow-up and Financial data for these students from the view
-    const studentIds = students.map(s => s.id);
-    const { data: followUpData, error: followUpError } = await supabase
-      .from('v_follow_up_task_list')
-      .select('student_id, next_task_due_date, total_due_amount')
-      .in('student_id', studentIds);
-
-    if (followUpError) throw followUpError;
-
-    // 3. FLOW THE DATA: Create a map for quick lookup
-    const followUpMap = new Map(followUpData.map(item => [item.student_id, item]));
-
+    // 2. Simple processing for the dynamic remarks
     const processedStudents = students.map(student => {
-      const info = followUpMap.get(student.id);
       let dynamicRemark = student.remarks || ""; 
+      const balance = Number(student.total_due_amount || 0);
+      const nextDate = student.next_task_due_date;
 
-      if (info) {
-        const balance = Number(info.total_due_amount);
-        const nextDate = info.next_task_due_date;
-
-        // Rule: If balance is 0, show FULL PAID
-        if (balance <= 0) {
-          dynamicRemark = "FULL PAID";
-        } 
-        // Rule: Otherwise flow the Next Task Date into remarks
-        else if (nextDate) {
-          const d = new Date(nextDate);
-          const day = String(d.getDate()).padStart(2, '0');
-          const month = d.toLocaleString('en-GB', { month: 'short' });
-          const year = d.getFullYear();
-          dynamicRemark = `${day} ${month} ${year}`;
-        }
+      if (balance <= 0 && student.total_due_amount !== null) {
+        dynamicRemark = "FULL PAID";
+      } else if (nextDate) {
+        const d = new Date(nextDate);
+        dynamicRemark = `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('en-GB', { month: 'short' })} ${d.getFullYear()}`;
       }
 
       return { ...student, remarks: dynamicRemark };
