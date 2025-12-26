@@ -8,7 +8,7 @@ const admin = require('../middleware/admin');
 
 // --- MODIFIED ---
 // All authenticated users (admin, faculty) can VIEW skills
-router.get('/', auth, skillsController.getAllSkills);
+router.get('/', auth ,skillsController.getAllSkills);
 
 // --- MODIFIED ---
 // Only ADMINS can CREATE skills
