@@ -7,38 +7,45 @@ const {
   getTicketById,
   updateTicket,
   deleteTicket,
-  getTicketCategories, // UPDATED: Import the new controller function
+  getAdmins,           // NEW: Added for admin assignment dropdown
+  getTicketCategories, 
+  postChatMessage,     // NEW: Added for admin replies
 } = require('../controllers/ticketManagementController.js');
 
+// --- TICKET MANAGEMENT ROUTES ---
+
 // @route   GET /api/tickets
-// @desc    Get all tickets with filtering, searching, and pagination
-// @access  Private (add auth middleware if needed)
-router.get('/', auth , getAllTickets);
+// @desc    Get all tickets with filtering, searching (by title/student), and pagination
+router.get('/', auth, getAllTickets);
 
 // @route   POST /api/tickets
-// @desc    Create a new ticket
-// @access  Private (add auth middleware if needed)
-router.post('/', auth ,createTicket);
+// @desc    Create a new ticket (Automatically defaults to Medium priority)
+router.post('/', auth, createTicket);
 
-// NEW: This route must come BEFORE the '/:id' route
 // @route   GET /api/tickets/categories
-// @desc    Get a unique list of all ticket categories
-// @access  Private (add auth middleware if needed)
-router.get('/categories',auth,  getTicketCategories);
+// @desc    Get a unique list of all ticket categories for the current location
+router.get('/categories', auth, getTicketCategories);
+
+// @route   GET /api/tickets/admins
+// @desc    Get all admins for the current location (Used for assignment dropdown)
+router.get('/admins', auth, getAdmins);
 
 // @route   GET /api/tickets/:id
 // @desc    Get a single ticket by its ID
-// @access  Private (add auth middleware if needed)
-router.get('/:id',auth, getTicketById);
+router.get('/:id', auth, getTicketById);
 
 // @route   PATCH /api/tickets/:id
-// @desc    Update a ticket's status or assignee
-// @access  Private
+// @desc    Update a ticket's status, assignee, or priority (Admin only)
 router.patch('/:id', auth, updateTicket);
 
 // @route   DELETE /api/tickets/:id
 // @desc    Delete a ticket by its ID
-// @access  Private
 router.delete('/:id', auth, deleteTicket);
+
+// --- CHAT ROUTES ---
+
+// @route   POST /api/tickets/:ticketId/messages
+// @desc    Post a reply from the admin and automatically update status to 'In Progress'
+router.post('/:ticketId/messages', auth, postChatMessage);
 
 module.exports = router;

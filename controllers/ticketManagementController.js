@@ -13,8 +13,7 @@ const handleSupabaseError = (res, error, context) => {
   return res.status(500).json({ error: `Failed to ${context.toLowerCase()}` });
 };
 
-// --- MODIFIED ---
-// Now automatically adds location_id based on the student
+// --- CREATE TICKET ---
 const createTicket = async (req, res) => {
   const { title, description, student_id, priority, category } = req.body;
 
@@ -23,8 +22,6 @@ const createTicket = async (req, res) => {
   }
 
   try {
-    // --- NEW ---
-    // 1. Find the student to get their location
     const { data: student, error: studentError } = await supabase
       .from('students')
       .select('location_id')
@@ -34,19 +31,17 @@ const createTicket = async (req, res) => {
     if (studentError || !student) {
       return res.status(404).json({ error: 'Student not found.' });
     }
-    // --- END NEW ---
 
-    // 2. Insert the ticket with the student's location
     const { data: ticket, error } = await supabase
       .from('tickets')
       .insert([{ 
         title, 
         description, 
         student_id,
-        priority: priority || 'Low',
+        priority: priority || 'Medium', // Defaulting to Medium as per requirement
         category: category || 'Other',
         status: 'Open',
-        location_id: student.location_id // --- MODIFIED ---
+        location_id: student.location_id 
       }])
       .select()
       .single();
@@ -62,10 +57,8 @@ const createTicket = async (req, res) => {
   }
 };
 
-// --- MODIFIED ---
-// Now filtered by the logged-in admin's location
+// --- GET ALL TICKETS (MODIFIED FOR SEARCH & STUDENT TICKET COUNT) ---
 const getAllTickets = async (req, res) => {
-  // --- NEW --- This route MUST be protected by auth
   if (!req.locationId) {
     return res.status(401).json({ error: 'Authentication required with location.' });
   }
@@ -74,15 +67,20 @@ const getAllTickets = async (req, res) => {
     const { status, search, category, page = 1, limit = 15 } = req.query;
     const offset = (page - 1) * limit;
 
+    // We select the student details and use a sub-selection to get the count of all tickets for that student
     let query = supabase
       .from('tickets')
       .select(`
         id, title, description, status, priority, category, created_at, updated_at,
-        student:students(id, name),
+        student:students(
+          id, 
+          name,
+          student_ticket_count:tickets(count)
+        ),
         assignee:users(id, username),
         assignee_id
       `, { count: 'exact' })
-      .eq('location_id', req.locationId); // --- MODIFIED --- Filter by location
+      .eq('location_id', req.locationId);
 
     if (status && status !== 'All') {
       query = query.eq('status', status);
@@ -93,7 +91,8 @@ const getAllTickets = async (req, res) => {
     }
 
     if (search) {
-      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
+      // MODIFIED: Added search for student name via foreign key relation
+      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%,students.name.ilike.%${search}%`);
     }
     
     query = query.order('created_at', { ascending: false });
@@ -103,8 +102,14 @@ const getAllTickets = async (req, res) => {
 
     if (error) return handleSupabaseError(res, error, 'fetching tickets');
 
+    // Flatten the count for easier frontend use: ticket.student.student_ticket_count[0].count -> ticket.student_ticket_count
+    const transformedTickets = tickets.map(ticket => ({
+      ...ticket,
+      student_ticket_count: ticket.student?.student_ticket_count?.[0]?.count || 0
+    }));
+
     res.status(200).json({
-      items: tickets,
+      items: transformedTickets,
       total: count,
       page: parseInt(page, 10),
       limit: parseInt(limit, 10),
@@ -117,8 +122,6 @@ const getAllTickets = async (req, res) => {
 };
 
 const getTicketById = async (req, res) => {
-  // --- NO CHANGES NEEDED ---
-  // Implicitly location-safe, as `getAllTickets` is filtered.
   const { id } = req.params;
   try {
     const { data: ticket, error } = await supabase
@@ -139,23 +142,23 @@ const getTicketById = async (req, res) => {
   }
 };
 
+// --- UPDATE TICKET (MODIFIED TO ALLOW PRIORITY SELECTION) ---
 const updateTicket = async (req, res) => {
-  // --- NO CHANGES NEEDED ---
-  // Implicitly location-safe, operates on a unique 'id'.
   const { id } = req.params;
-  const { assignee_id, status } = req.body;
-  // ... (rest of function is unchanged) ...
+  const { assignee_id, status, priority } = req.body; // MODIFIED: Added priority here
+  
   const updatePayload = {};
 
   if (status) {
-    if (status !== 'Resolved') {
-      return res.status(403).json({ 
-        error: "Forbidden: Only 'Resolved' status can be set manually. Status changes to 'In Progress' are automatic." 
-      });
-    }
+    // Note: 'In Progress' is usually handled by the chat RPC, but we allow 'Resolved' here
     updatePayload.status = status;
   }
   
+  if (priority) {
+    // MODIFIED: Admins can now change priority (Low, Medium, High)
+    updatePayload.priority = priority;
+  }
+
   if (assignee_id !== undefined) {
     updatePayload.assignee_id = assignee_id;
   }
@@ -186,15 +189,17 @@ const updateTicket = async (req, res) => {
       .from('tickets')
       .update(updatePayload)
       .eq('id', id)
-      .select()
+      .select(`*, student:students(name)`)
       .single();
 
     if (error) return handleSupabaseError(res, error, `updating ticket ${id}`);
 
-    const logMessage = status === 'Resolved' 
-      ? `Ticket "${ticket.title}" was marked as Resolved.`
-      : `Ticket "${ticket.title}" assignment was updated.`;
-    await logActivity("Updated", logMessage, req.user.id);
+    // Log the activity based on what changed
+    let activityDetail = `Updated ticket "${ticket.title}".`;
+    if (status) activityDetail += ` Status changed to ${status}.`;
+    if (priority) activityDetail += ` Priority changed to ${priority}.`;
+
+    await logActivity("Updated", activityDetail, req.user.id);
 
     res.status(200).json(ticket);
 
@@ -205,8 +210,6 @@ const updateTicket = async (req, res) => {
 };
 
 const deleteTicket = async (req, res) => {
-  // --- NO CHANGES NEEDED ---
-  // Implicitly location-safe, operates on a unique 'id'.
   const { id } = req.params;
   try {
     const { data: ticket, error } = await supabase.from('tickets').delete().eq('id', id).select().single();
@@ -219,10 +222,7 @@ const deleteTicket = async (req, res) => {
   }
 };
 
-// --- MODIFIED ---
-// Now filtered by the logged-in admin's location
 const getAdmins = async (req, res) => {
-  // --- NEW --- This route MUST be protected by auth
   if (!req.locationId) {
     return res.status(401).json({ error: 'Authentication required with location.' });
   }
@@ -241,7 +241,7 @@ const getAdmins = async (req, res) => {
         .from('users')
         .select('id, username')
         .eq('role', 'admin')
-        .eq('location_id', req.locationId) // --- MODIFIED --- Filter by location
+        .eq('location_id', req.locationId) 
         .range(from, to);
 
       if (error) return handleSupabaseError(res, error, 'fetching admins');
@@ -265,17 +265,11 @@ const getAdmins = async (req, res) => {
 };
 
 const getTicketCategories = async (req, res) => {
-  // --- NEW --- This route MUST be protected by auth
   if (!req.locationId) {
     return res.status(401).json({ error: 'Authentication required with location.' });
   }
   
   try {
-    // --- MODIFIED ---
-    // We now pass the location_id to the RPC function.
-    // NOTE: You MUST update your SQL function `get_unique_ticket_categories`
-    // to accept a `p_location_id INT` argument and add a
-    // `WHERE location_id = p_location_id` clause.
     const { data, error } = await supabase
       .rpc('get_unique_ticket_categories', {
         p_location_id: req.locationId 
@@ -292,8 +286,6 @@ const getTicketCategories = async (req, res) => {
 };
 
 const postChatMessage = async (req, res) => {
-    // --- NO CHANGES NEEDED ---
-    // Implicitly location-safe, operates on a unique 'ticketId'.
     const { ticketId } = req.params;
     const { message } = req.body;
     const sender_user_id = req.user.id; 
