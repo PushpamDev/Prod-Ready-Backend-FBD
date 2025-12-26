@@ -1,71 +1,66 @@
 // controllers/dashboardController.js
 const supabase = require('../db');
 
-/**
- * @description Get all data for the main admissions dashboard.
- * Fetches high-level metrics and a list of all admissions from the financial summary view.
- */
 exports.getDashboardData = async (req, res) => {
   const { search = '' } = req.query;
 
   try {
-    // --- 1. Fetch Admissions List ---
-    // We use 'v_admission_financial_summary' because it has all the
-    // financial data (base, total, paid, remaining, status) we need.
-    let query = supabase
-      .from('v_admission_financial_summary')
-      .select(`
-        admission_id,
-        student_name,
-        student_phone_number,
-        created_at,
-        status,
-        total_payable_amount,
-        total_paid,
-        remaining_due,
-        branch  
-      `)
-      .order('created_at', { ascending: false });
+    // 1. Fetch Admissions and their Installments simultaneously
+    const [admissionsRes, installmentsRes] = await Promise.all([
+      supabase.from('v_admission_financial_summary').select('*').order('created_at', { ascending: false }),
+      supabase.from('installments').select('admission_id, amount')
+    ]);
 
-    if (search) {
-      query = query.or(
-        `student_name.ilike.%${search}%,student_phone_number.ilike.%${search}%`
-      );
-    }
+    if (admissionsRes.error) throw admissionsRes.error;
+    if (installmentsRes.error) throw installmentsRes.error;
 
-    const { data: admissions, error: admissionsError } = await query;
-    if (admissionsError) throw admissionsError;
+    let admissions = admissionsRes.data;
+    const allInstallments = installmentsRes.data;
 
-    // --- 2. Fetch Metrics (This is an example, your logic might be more complex) ---
-    // In a real-world scenario, you might create another view just for metrics
-    // or run aggregate queries. For now, we'll derive from the list.
+    // 2. Map installments to their admissions to calculate "True Total"
+    const installmentTotalsMap = allInstallments.reduce((acc, inst) => {
+      acc[inst.admission_id] = (acc[inst.admission_id] || 0) + Number(inst.amount);
+      return acc;
+    }, {});
+
+    // 3. Synchronize data for the list and metrics
+    const synchronizedAdmissions = admissions.map(adm => {
+      const trueTotal = installmentTotalsMap[adm.admission_id] || adm.total_payable_amount;
+      return {
+        ...adm,
+        total_payable_amount: trueTotal,
+        remaining_due: trueTotal - adm.total_paid
+      };
+    });
+
+    // 4. Filtering for search (if applicable)
+    const finalAdmissions = search 
+      ? synchronizedAdmissions.filter(a => 
+          a.student_name.toLowerCase().includes(search.toLowerCase()) || 
+          a.student_phone_number.includes(search))
+      : synchronizedAdmissions;
+
+    // 5. Calculate Metrics using the Synchronized Data
+    const totalCollected = finalAdmissions.reduce((acc, adm) => acc + Number(adm.total_paid), 0);
+    const totalOutstanding = finalAdmissions.reduce((acc, adm) => acc + Number(adm.remaining_due), 0);
     
-    const totalAdmissions = admissions.length;
-    const totalCollected = admissions.reduce((acc, adm) => acc + adm.total_paid, 0);
-    const totalOutstanding = admissions.reduce((acc, adm) => acc + adm.remaining_due, 0);
-    const overdueCount = admissions.filter(adm => adm.status === 'Overdue').length;
-
-    // Example: "This Month" metrics
     const thisMonth = new Date().getMonth();
     const thisYear = new Date().getFullYear();
-    const admissionsThisMonth = admissions.filter(adm => {
+    const admissionsThisMonth = finalAdmissions.filter(adm => {
         const admDate = new Date(adm.created_at);
         return admDate.getMonth() === thisMonth && admDate.getFullYear() === thisYear;
     });
 
-    const metrics = {
-      totalAdmissions: totalAdmissions,
-      admissionsThisMonth: admissionsThisMonth.length,
-      totalCollected: totalCollected,
-      revenueCollectedThisMonth: admissionsThisMonth.reduce((acc, adm) => acc + adm.total_paid, 0),
-      totalOutstanding: totalOutstanding,
-      overdueCount: overdueCount
-    };
-
-    // --- 3. Send Response ---
     res.status(200).json({
-      metrics,
-      admissions,
+      metrics: {
+        totalAdmissions: finalAdmissions.length,
+        admissionsThisMonth: admissionsThisMonth.length,
+        totalCollected,
+        revenueCollectedThisMonth: admissionsThisMonth.reduce((acc, adm) => acc + Number(adm.total_paid), 0),
+        totalOutstanding,
+        overdueCount: finalAdmissions.filter(adm => adm.status === 'Overdue').length
+      },
+      admissions: finalAdmissions,
     });
 
   } catch (error) {

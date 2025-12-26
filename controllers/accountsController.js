@@ -219,9 +219,8 @@ exports.getAccountDetails = async (req, res) => {
       paymentsResult,
       coursesResult
     ] = await Promise.all([
-      // 1. Fetching admission_number along with other details
       supabase.from('v_admission_financial_summary')
-              .select('student_name, admission_number, total_payable_amount, total_paid, remaining_due, student_phone_number, branch') 
+              .select('student_name, admission_number, student_phone_number, branch') 
               .eq('admission_id', admissionId)
               .single(),
       supabase.from('v_installment_status') 
@@ -243,37 +242,39 @@ exports.getAccountDetails = async (req, res) => {
     if (coursesResult.error) throw coursesResult.error;
 
     const financials = financialsResult.data;
+    const installments = installmentsResult.data || [];
+    const payments = paymentsResult.data || [];
+
+    // --- FIX: Dynamic Calculation ---
+    // Calculate total fees from installments directly to ensure UI consistency
+    const calculatedTotalFees = installments.reduce((sum, inst) => sum + Number(inst.amount_due), 0);
+    const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount_paid), 0);
 
     const responseData = {
-      // 2. Mapping it to the response
       admission_number: financials.admission_number,
       name: financials.student_name,
       phones: [financials.student_phone_number],
       branch: financials.branch,
-      total_fees: financials.total_payable_amount,
-      total_paid: financials.total_paid,
-      balance: financials.remaining_due,
-      installments: (installmentsResult.data || []).map(inst => ({
+      total_fees: calculatedTotalFees, // Forced match with installments
+      total_paid: totalPaid,
+      balance: calculatedTotalFees - totalPaid,
+      installments: installments.map(inst => ({
         id: inst.id,
         due_date: inst.due_date,
         amount: inst.amount_due, 
         status: inst.status
       })),
-      payments: paymentsResult.data || [],
+      payments: payments,
       courses: (coursesResult.data || []).map(c => c.courses.name)
     };
 
     res.status(200).json(responseData);
 
   } catch (error) {
-    console.error(`Error fetching account details for admission ${admissionId}:`, error);
-    if (error.code === 'PGRST116') {
-      return res.status(404).json({ error: 'Admission financial summary not found.' });
-    }
+    console.error(`Error fetching account details:`, error);
     res.status(500).json({ error: 'An unexpected server error occurred.' });
   }
 };
-
 
 /**
  * @description Get data needed to generate a receipt for a specific payment.

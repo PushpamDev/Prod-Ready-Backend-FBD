@@ -255,3 +255,63 @@ exports.createAdmission = async (req, res) => {
       .json({ error: error.message || 'Error creating admission.' });
   }
 };
+
+exports.updateAdmission = async (req, res) => {
+  const { id } = req.params;
+  
+  const {
+    student_name,
+    student_phone_number,
+    father_name,
+    father_phone_number,
+    permanent_address,
+    current_address,
+    identification_type,
+    identification_number,
+    date_of_admission,
+    course_start_date,
+    batch_preference,
+    remarks,
+    certificate_id,
+    discount,
+    course_ids,
+    installments
+  } = req.body;
+
+  // Security Check: Only allow 'pushpam'
+  if (req.user?.username !== 'pushpam') {
+    return res.status(403).json({ error: "Access denied. Only 'pushpam' can edit admissions." });
+  }
+
+  // Handle locationId safely as a string for the RPC to cast later
+  const locationIdStr = req.locationId ? String(req.locationId) : null;
+
+  try {
+    const { data, error } = await supabase.rpc('update_admission_full', {
+        p_admission_id: id,
+        p_student_name: student_name,
+        p_student_phone_number: student_phone_number,
+        p_father_name: father_name || null,
+        p_father_phone_number: father_phone_number || null,
+        p_permanent_address: permanent_address || null,
+        p_current_address: current_address || null,
+        p_identification_type: identification_type || null,
+        p_identification_number: identification_number || null,
+        p_date_of_admission: date_of_admission,
+        p_course_start_date: course_start_date || null,
+        p_batch_preference: batch_preference || null,
+        p_remarks: remarks || null,
+        p_certificate_id: (certificate_id && certificate_id.length > 20) ? certificate_id : null,
+        p_discount: Number(discount) || 0,
+        p_course_ids: Array.isArray(course_ids) ? course_ids : [],
+        p_installments: installments || [], 
+        p_location_id: locationIdStr // Passed as string to RPC
+    });
+
+    if (error) throw error;
+    res.status(200).json({ message: 'Admission updated successfully' });
+  } catch (error) {
+    console.error('Error updating admission:', error);
+    res.status(500).json({ error: error.message || 'Error updating admission.' });
+  }
+};
