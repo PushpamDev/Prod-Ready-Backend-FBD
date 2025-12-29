@@ -5,7 +5,7 @@ const supabase = require('../db');
 /**
  * @description
  * Get Admission Dashboard rows (FLAT STRUCTURE).
- * RPC `get_admission_dashboard` now RETURNS TABLE (rows), NOT JSON.
+ * RPC `get_admission_dashboard` returns TABLE (rows).
  * Metrics are calculated separately for clarity and stability.
  */
 exports.getAllAdmissions = async (req, res) => {
@@ -76,8 +76,7 @@ exports.getAllAdmissions = async (req, res) => {
 
     if (error.code === '42883') {
       return res.status(500).json({
-        error:
-          "Database function 'get_admission_dashboard' not found or signature mismatch.",
+        error: "Database function 'get_admission_dashboard' not found or signature mismatch.",
       });
     }
 
@@ -141,7 +140,8 @@ exports.getAdmissionById = async (req, res) => {
 
 /**
  * @description
- * Create a new admission using RPC
+ * Create a new admission using RPC.
+ * This is accessible to any authenticated user with a locationId.
  */
 exports.createAdmission = async (req, res) => {
   const {
@@ -168,39 +168,28 @@ exports.createAdmission = async (req, res) => {
   /* ---------------------------- VALIDATION ---------------------------- */
   if (!locationId) {
     return res.status(400).json({
-      error:
-        'User does not have an assigned Branch Location. Please contact Admin.',
+      error: 'User does not have an assigned Branch Location. Please contact Admin.',
     });
   }
 
   if (!student_name || !student_phone_number) {
-    return res
-      .status(400)
-      .json({ error: 'Student Name and Phone Number are required.' });
+    return res.status(400).json({ error: 'Student Name and Phone Number are required.' });
   }
 
   if (!date_of_admission) {
-    return res
-      .status(400)
-      .json({ error: 'Date of Admission is required.' });
+    return res.status(400).json({ error: 'Date of Admission is required.' });
   }
 
   if (!Array.isArray(course_ids) || course_ids.length === 0) {
-    return res
-      .status(400)
-      .json({ error: 'At least one course must be selected.' });
+    return res.status(400).json({ error: 'At least one course must be selected.' });
   }
 
   if (!Array.isArray(installments)) {
-    return res
-      .status(400)
-      .json({ error: 'Installments must be provided as an array.' });
+    return res.status(400).json({ error: 'Installments must be provided as an array.' });
   }
 
   if (discount && isNaN(parseFloat(discount))) {
-    return res
-      .status(400)
-      .json({ error: 'Discount must be a valid number.' });
+    return res.status(400).json({ error: 'Discount must be a valid number.' });
   }
 
   /* ----------------------------- RPC CALL ----------------------------- */
@@ -245,20 +234,27 @@ exports.createAdmission = async (req, res) => {
 
     if (error.code === '42883') {
       return res.status(500).json({
-        error:
-          'Database function signature mismatch. Please update the SQL function.',
+        error: 'Database function signature mismatch. Please update the SQL function.',
       });
     }
 
-    res
-      .status(500)
-      .json({ error: error.message || 'Error creating admission.' });
+    res.status(500).json({ error: error.message || 'Error creating admission.' });
   }
 };
 
+/**
+ * @description
+ * Update an existing admission.
+ * STRICT SECURITY: Only user 'pushpam' can proceed.
+ */
 exports.updateAdmission = async (req, res) => {
   const { id } = req.params;
   
+  // Security Check: Restrict editing specifically to 'pushpam'
+  if (req.user?.username !== 'pushpam') {
+    return res.status(403).json({ error: "Access denied. Only 'pushpam' can edit admissions." });
+  }
+
   const {
     student_name,
     student_phone_number,
@@ -277,11 +273,6 @@ exports.updateAdmission = async (req, res) => {
     course_ids,
     installments
   } = req.body;
-
-  // Security Check: Only allow 'pushpam'
-  if (req.user?.username !== 'pushpam') {
-    return res.status(403).json({ error: "Access denied. Only 'pushpam' can edit admissions." });
-  }
 
   // Handle locationId safely as a string for the RPC to cast later
   const locationIdStr = req.locationId ? String(req.locationId) : null;
@@ -305,7 +296,7 @@ exports.updateAdmission = async (req, res) => {
         p_discount: Number(discount) || 0,
         p_course_ids: Array.isArray(course_ids) ? course_ids : [],
         p_installments: installments || [], 
-        p_location_id: locationIdStr // Passed as string to RPC
+        p_location_id: locationIdStr
     });
 
     if (error) throw error;
