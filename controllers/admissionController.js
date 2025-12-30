@@ -161,6 +161,7 @@ exports.createAdmission = async (req, res) => {
     discount,
     course_ids,
     installments,
+    source_intake_id,
   } = req.body;
 
   const locationId = req.locationId;
@@ -214,6 +215,7 @@ exports.createAdmission = async (req, res) => {
         p_course_ids: course_ids,
         p_installments: installments,
         p_location_id: locationId,
+        p_source_intake_id: source_intake_id || null,
       }
     );
 
