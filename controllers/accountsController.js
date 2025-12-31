@@ -2,17 +2,6 @@
 const supabase = require('../db');
 
 // --- Helper for new receipt number ---
-const generateReceiptNumber = () => {
-  const now = new Date();
-  const pad = (num) => String(num).padStart(2, '0');
-  const day = pad(now.getDate());
-  const month = pad(now.getMonth() + 1);
-  const year = now.getFullYear();
-  const hours = pad(now.getHours());
-  const minutes = pad(now.getMinutes());
-  const seconds = pad(now.getSeconds());
-  return `RVM BEYOND/${day}-${month}-${year}/${hours}${minutes}${seconds}`;
-};
 
 /**
  * @description Get admissions list for the approval page or general accounts view.
@@ -158,50 +147,77 @@ exports.rejectAdmission = async (req, res) => {
  * @description Record a payment for an admission.
  */
 exports.recordPayment = async (req, res) => {
-    const { admission_id, amount_paid, payment_date, method, notes } = req.body;
-    const user_id = req.user?.id; 
+  const { admission_id, amount_paid, payment_date, method, notes } = req.body;
+  const user_id = req.user?.id;
 
-    if (!admission_id || !amount_paid || !payment_date || !method || !user_id) {
-        return res.status(400).json({ error: 'admission_id, amount_paid, payment_date, method, and user_id are required.' });
+  if (!admission_id || !amount_paid || !payment_date || !method || !user_id) {
+    return res.status(400).json({
+      error: 'admission_id, amount_paid, payment_date, method, and user_id are required.',
+    });
+  }
+
+  try {
+    /* ----------------------------------------
+       1. Generate receipt number (RPC)
+    ---------------------------------------- */
+    const { data: receiptNumber, error: receiptError } =
+      await supabase.rpc('generate_receipt_number');
+
+    if (receiptError || !receiptNumber) {
+      throw new Error('Failed to generate receipt number');
     }
 
-    const newReceiptNumber = generateReceiptNumber();
+    /* ----------------------------------------
+       2. Insert payment ONCE
+    ---------------------------------------- */
+    const { data: paymentData, error: paymentError } = await supabase
+      .from('payments')
+      .insert({
+        admission_id,
+        amount_paid: parseFloat(amount_paid),
+        payment_date,
+        method,
+        receipt_number: receiptNumber,
+        notes,
+        created_by: user_id,
+      })
+      .select('id')
+      .single();
 
-    try {
-        const { data: paymentData, error: paymentError } = await supabase
-            .from('payments')
-            .insert({
-                admission_id,
-                amount_paid: parseFloat(amount_paid),
-                payment_date,
-                method,
-                receipt_number: newReceiptNumber,
-                notes, // This saves the cheque/transaction number
-                created_by: user_id
-            })
-            .select('id') 
-            .single();
+    if (paymentError) throw paymentError;
 
-        if (paymentError) throw paymentError;
+    /* ----------------------------------------
+       3. Apply payment to installments
+    ---------------------------------------- */
+    const { error: updateError } = await supabase.rpc(
+      'apply_payment_to_installments',
+      {
+        p_payment_id: paymentData.id,
+      }
+    );
 
-        const { error: updateError } = await supabase.rpc('apply_payment_to_installments', {
-             p_payment_id: paymentData.id
-        });
-
-        if (updateError) {
-             console.error(`CRITICAL: Failed to apply payment ${paymentData.id} to installments for admission ${admission_id}:`, updateError);
-             return res.status(500).json({
-                 error: 'Payment recorded, but failed to update installment status. Please check manually.',
-                 details: updateError.message
-             });
-        }
-    
-        res.status(201).json({ message: 'Payment recorded and applied successfully.', data: paymentData });
-
-    } catch (error) {
-        console.error('Error recording payment:', error);
-        res.status(500).json({ error: 'An error occurred while recording the payment.' });
+    if (updateError) {
+      console.error('Installment update failed:', updateError);
+      return res.status(500).json({
+        error: 'Payment recorded, but failed to update installments.',
+      });
     }
+
+    /* ----------------------------------------
+       4. Success
+    ---------------------------------------- */
+    res.status(201).json({
+      message: 'Payment recorded successfully.',
+      payment_id: paymentData.id,
+      receipt_number: receiptNumber,
+    });
+
+  } catch (error) {
+    console.error('Error recording payment:', error);
+    res.status(500).json({
+      error: 'An error occurred while recording the payment.',
+    });
+  }
 };
 
 /**
