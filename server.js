@@ -27,7 +27,7 @@ const accountsRoutes = require('./routes/accountsRoutes');
 const substitutionRoutes = require("./routes/substitution");
 const intakeRoutes = require('./routes/intake');
 const admissionUndertakingRoutes = require('./routes/admissionUndertaking');
-
+const batchAllotmentRoutes = require('./routes/batchAllotmentRoutes');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const auth = require("./middleware/auth");
@@ -61,6 +61,8 @@ app.use("/api/follow-ups", auth, followUpRoutes);
 app.use("/api/substitutions", auth, substitutionRoutes);
 app.use('/api/intakes', intakeRoutes);
 app.use('/', admissionUndertakingRoutes);
+app.use('/api/batch-allotment', auth, batchAllotmentRoutes);
+
 // --- 2. SERVE STATIC FRONTEND FILES (for Production) ---
 const frontendBuildPath = path.join(__dirname, '../Prod-Ready-Frontend-FBD-main/dist/spa');
 app.use(express.static(frontendBuildPath));
