@@ -15,14 +15,17 @@ const getAllStudents = async (req, res) => {
   const to = from + limit - 1;
 
   try {
-    // 1. Query the View directly
     let query = supabase
       .from('v_students_with_followup')
       .select('*', { count: 'exact' })
       .eq('location_id', req.locationId);
 
+    /* ✅ FIXED SEARCH LOGIC */
     if (search) {
-      query = query.or(`name.ilike.%${search}%,admission_number.ilike.%${search}%`);
+      const safeSearch = search.replace(/%/g, ''); // safety
+      query = query.or(
+        `name.ilike.%${safeSearch}%,admission_number.ilike.%${safeSearch}%,phone_number.ilike.%${safeSearch}%`
+      );
     }
 
     const { data: students, error, count } = await query
@@ -31,26 +34,25 @@ const getAllStudents = async (req, res) => {
 
     if (error) throw error;
 
-    // 2. Defensive processing for the dynamic remarks
-    // Added .filter(Boolean) to ensure undefined/null records are not sent to the frontend
-    const processedStudents = (students || [])
-      .filter(Boolean) 
-      .map(student => {
-        let dynamicRemark = student.remarks || ""; 
-        const balance = Number(student.total_due_amount || 0);
-        const nextDate = student.next_task_due_date;
+    const processedStudents = (students || []).map(student => {
+      let dynamicRemark = student.remarks || '';
+      const balance = Number(student.total_due_amount || 0);
+      const nextDate = student.next_task_due_date;
 
-        if (balance <= 0 && student.total_due_amount !== null) {
-          dynamicRemark = "FULL PAID";
-        } else if (nextDate) {
-          const d = new Date(nextDate);
-          dynamicRemark = `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('en-GB', { month: 'short' })} ${d.getFullYear()}`;
-        }
+      if (balance <= 0 && student.total_due_amount !== null) {
+        dynamicRemark = 'FULL PAID';
+      } else if (nextDate) {
+        const d = new Date(nextDate);
+        dynamicRemark = `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('en-GB', { month: 'short' })} ${d.getFullYear()}`;
+      }
 
-        return { ...student, remarks: dynamicRemark };
-      });
+      return { ...student, remarks: dynamicRemark };
+    });
 
-    res.status(200).json({ students: processedStudents, count: count || 0 });
+    res.status(200).json({
+      students: processedStudents,
+      count: count || 0,
+    });
 
   } catch (error) {
     console.error('Error in getAllStudents:', error);
