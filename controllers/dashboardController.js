@@ -5,66 +5,52 @@ exports.getDashboardData = async (req, res) => {
   const { search = '' } = req.query;
 
   try {
-    // 1. Fetch Admissions and their Installments simultaneously
-    const [admissionsRes, installmentsRes] = await Promise.all([
-      supabase.from('v_admission_financial_summary').select('*').order('created_at', { ascending: false }),
-      supabase.from('installments').select('admission_id, amount')
-    ]);
+    const { data, error } = await supabase
+      .from('v_admission_financial_summary')
+      .select('*')
+      .order('created_at', { ascending: false });
 
-    if (admissionsRes.error) throw admissionsRes.error;
-    if (installmentsRes.error) throw installmentsRes.error;
+    if (error) throw error;
 
-    let admissions = admissionsRes.data;
-    const allInstallments = installmentsRes.data;
+    const rows = search
+      ? data.filter(r =>
+          r.student_name?.toLowerCase().includes(search.toLowerCase()) ||
+          r.student_phone_number?.includes(search) ||
+          r.admission_number?.toLowerCase().includes(search.toLowerCase())
+        )
+      : data;
 
-    // 2. Map installments to their admissions to calculate "True Total"
-    const installmentTotalsMap = allInstallments.reduce((acc, inst) => {
-      acc[inst.admission_id] = (acc[inst.admission_id] || 0) + Number(inst.amount);
-      return acc;
-    }, {});
+    const now = new Date();
+    const m = now.getMonth();
+    const y = now.getFullYear();
 
-    // 3. Synchronize data for the list and metrics
-    const synchronizedAdmissions = admissions.map(adm => {
-      const trueTotal = installmentTotalsMap[adm.admission_id] || adm.total_payable_amount;
-      return {
-        ...adm,
-        total_payable_amount: trueTotal,
-        remaining_due: trueTotal - adm.total_paid
-      };
-    });
-
-    // 4. Filtering for search (if applicable)
-    const finalAdmissions = search 
-      ? synchronizedAdmissions.filter(a => 
-          a.student_name.toLowerCase().includes(search.toLowerCase()) || 
-          a.student_phone_number.includes(search))
-      : synchronizedAdmissions;
-
-    // 5. Calculate Metrics using the Synchronized Data
-    const totalCollected = finalAdmissions.reduce((acc, adm) => acc + Number(adm.total_paid), 0);
-    const totalOutstanding = finalAdmissions.reduce((acc, adm) => acc + Number(adm.remaining_due), 0);
-    
-    const thisMonth = new Date().getMonth();
-    const thisYear = new Date().getFullYear();
-    const admissionsThisMonth = finalAdmissions.filter(adm => {
-        const admDate = new Date(adm.created_at);
-        return admDate.getMonth() === thisMonth && admDate.getFullYear() === thisYear;
-    });
+    const metrics = {
+      totalAdmissions: rows.length,
+      admissionsThisMonth: rows.filter(r => {
+        const d = new Date(r.created_at);
+        return d.getMonth() === m && d.getFullYear() === y;
+      }).length,
+      totalCollected: rows.reduce((s, r) => s + Number(r.total_paid || 0), 0),
+      revenueCollectedThisMonth: rows
+        .filter(r => {
+          const d = new Date(r.created_at);
+          return d.getMonth() === m && d.getFullYear() === y;
+        })
+        .reduce((s, r) => s + Number(r.total_paid || 0), 0),
+      totalOutstanding: rows.reduce(
+        (s, r) => s + Number(r.remaining_due || 0),
+        0
+      ),
+      overdueCount: rows.filter(r => r.status === 'Overdue').length,
+    };
 
     res.status(200).json({
-      metrics: {
-        totalAdmissions: finalAdmissions.length,
-        admissionsThisMonth: admissionsThisMonth.length,
-        totalCollected,
-        revenueCollectedThisMonth: admissionsThisMonth.reduce((acc, adm) => acc + Number(adm.total_paid), 0),
-        totalOutstanding,
-        overdueCount: finalAdmissions.filter(adm => adm.status === 'Overdue').length
-      },
-      admissions: finalAdmissions,
+      metrics,
+      admissions: rows,
     });
 
-  } catch (error) {
-    console.error('Error fetching dashboard data:', error);
-    res.status(500).json({ error: 'An unexpected error occurred.' });
+  } catch (err) {
+    console.error('Dashboard Error:', err);
+    res.status(500).json({ error: 'Failed to load dashboard' });
   }
 };

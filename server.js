@@ -26,6 +26,7 @@ const dashboardRoutes = require('./routes/dashboardRoutes');
 const accountsRoutes = require('./routes/accountsRoutes');
 const substitutionRoutes = require("./routes/substitution");
 const intakeRoutes = require('./routes/intake');
+const admissionUndertakingRoutes = require('./routes/admissionUndertaking');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -59,6 +60,7 @@ app.use("/api/certificates", certificateRoutes);
 app.use("/api/follow-ups", auth, followUpRoutes);
 app.use("/api/substitutions", auth, substitutionRoutes);
 app.use('/api/intakes', intakeRoutes);
+app.use('/', admissionUndertakingRoutes);
 // --- 2. SERVE STATIC FRONTEND FILES (for Production) ---
 const frontendBuildPath = path.join(__dirname, '../Prod-Ready-Frontend-FBD-main/dist/spa');
 app.use(express.static(frontendBuildPath));

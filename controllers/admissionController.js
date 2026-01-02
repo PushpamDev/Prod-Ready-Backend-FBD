@@ -15,9 +15,7 @@ exports.getAllAdmissions = async (req, res) => {
     /* ----------------------- 1. FETCH ROW DATA ----------------------- */
     const { data: rows, error } = await supabase.rpc(
       'get_admission_dashboard',
-      {
-        search_term: searchTerm,
-      }
+      { search_term: searchTerm }
     );
 
     if (error) {
@@ -27,7 +25,18 @@ exports.getAllAdmissions = async (req, res) => {
 
     const safeRows = Array.isArray(rows) ? rows : [];
 
-    /* ----------------------- 2. CALCULATE METRICS ---------------------- */
+    /* ----------------------- 2. ENRICH ROW DATA ----------------------- */
+    const enrichedRows = safeRows.map((r) => ({
+      ...r,
+
+      // ✅ Backend is authoritative for undertaking status
+      undertaking_status:
+        r.approval_status === 'Approved'
+          ? 'Completed'
+          : 'Pending',
+    }));
+
+    /* ----------------------- 3. CALCULATE METRICS ---------------------- */
     const now = new Date();
     const currentMonth = now.getMonth();
     const currentYear = now.getFullYear();
@@ -38,7 +47,7 @@ exports.getAllAdmissions = async (req, res) => {
     let admissionsThisMonth = 0;
     let overdueCount = 0;
 
-    safeRows.forEach((r) => {
+    enrichedRows.forEach((r) => {
       const createdAt = new Date(r.created_at);
 
       totalCollected += Number(r.total_paid || 0);
@@ -58,7 +67,7 @@ exports.getAllAdmissions = async (req, res) => {
     });
 
     const metrics = {
-      totalAdmissions: safeRows.length,
+      totalAdmissions: enrichedRows.length,
       admissionsThisMonth,
       totalCollected,
       revenueCollectedThisMonth,
@@ -66,17 +75,19 @@ exports.getAllAdmissions = async (req, res) => {
       overdueCount,
     };
 
-    /* ----------------------- 3. SEND RESPONSE ------------------------- */
+    /* ----------------------- 4. SEND RESPONSE ------------------------- */
     res.status(200).json({
       metrics,
-      rows: safeRows,
+      admissions: enrichedRows, // ✅ frontend-safe
     });
+
   } catch (error) {
     console.error('Error fetching dashboard data:', error);
 
     if (error.code === '42883') {
       return res.status(500).json({
-        error: "Database function 'get_admission_dashboard' not found or signature mismatch.",
+        error:
+          "Database function 'get_admission_dashboard' not found or signature mismatch.",
       });
     }
 
@@ -123,7 +134,7 @@ exports.getAdmissionById = async (req, res) => {
     if (installmentsError) throw installmentsError;
 
     res.status(200).json({
-      ...admission,
+      ...admission,              // includes undertaking_status automatically
       courses,
       installments: installments || [],
     });
@@ -141,7 +152,7 @@ exports.getAdmissionById = async (req, res) => {
 /**
  * @description
  * Create a new admission using RPC.
- * This is accessible to any authenticated user with a locationId.
+ * Undertaking status is DB-driven (Pending / Completed).
  */
 exports.createAdmission = async (req, res) => {
   const {
@@ -174,23 +185,33 @@ exports.createAdmission = async (req, res) => {
   }
 
   if (!student_name || !student_phone_number) {
-    return res.status(400).json({ error: 'Student Name and Phone Number are required.' });
+    return res.status(400).json({
+      error: 'Student Name and Phone Number are required.',
+    });
   }
 
   if (!date_of_admission) {
-    return res.status(400).json({ error: 'Date of Admission is required.' });
+    return res.status(400).json({
+      error: 'Date of Admission is required.',
+    });
   }
 
   if (!Array.isArray(course_ids) || course_ids.length === 0) {
-    return res.status(400).json({ error: 'At least one course must be selected.' });
+    return res.status(400).json({
+      error: 'At least one course must be selected.',
+    });
   }
 
   if (!Array.isArray(installments)) {
-    return res.status(400).json({ error: 'Installments must be provided as an array.' });
+    return res.status(400).json({
+      error: 'Installments must be provided as an array.',
+    });
   }
 
   if (discount && isNaN(parseFloat(discount))) {
-    return res.status(400).json({ error: 'Discount must be a valid number.' });
+    return res.status(400).json({
+      error: 'Discount must be a valid number.',
+    });
   }
 
   /* ----------------------------- RPC CALL ----------------------------- */
@@ -215,7 +236,7 @@ exports.createAdmission = async (req, res) => {
         p_course_ids: course_ids,
         p_installments: installments,
         p_location_id: locationId,
-        p_source_intake_id: source_intake_id || null,
+        p_source_intake_id: source_intake_id || null, // ✅ drives undertaking status
       }
     );
 
@@ -240,7 +261,9 @@ exports.createAdmission = async (req, res) => {
       });
     }
 
-    res.status(500).json({ error: error.message || 'Error creating admission.' });
+    res.status(500).json({
+      error: error.message || 'Error creating admission.',
+    });
   }
 };
 
@@ -251,10 +274,11 @@ exports.createAdmission = async (req, res) => {
  */
 exports.updateAdmission = async (req, res) => {
   const { id } = req.params;
-  
-  // Security Check: Restrict editing specifically to 'pushpam'
+
   if (req.user?.username !== 'pushpam') {
-    return res.status(403).json({ error: "Access denied. Only 'pushpam' can edit admissions." });
+    return res.status(403).json({
+      error: "Access denied. Only 'pushpam' can edit admissions.",
+    });
   }
 
   const {
@@ -273,38 +297,74 @@ exports.updateAdmission = async (req, res) => {
     certificate_id,
     discount,
     course_ids,
-    installments
+    installments,
   } = req.body;
 
-  // Handle locationId safely as a string for the RPC to cast later
   const locationIdStr = req.locationId ? String(req.locationId) : null;
 
   try {
-    const { data, error } = await supabase.rpc('update_admission_full', {
-        p_admission_id: id,
-        p_student_name: student_name,
-        p_student_phone_number: student_phone_number,
-        p_father_name: father_name || null,
-        p_father_phone_number: father_phone_number || null,
-        p_permanent_address: permanent_address || null,
-        p_current_address: current_address || null,
-        p_identification_type: identification_type || null,
-        p_identification_number: identification_number || null,
-        p_date_of_admission: date_of_admission,
-        p_course_start_date: course_start_date || null,
-        p_batch_preference: batch_preference || null,
-        p_remarks: remarks || null,
-        p_certificate_id: (certificate_id && certificate_id.length > 20) ? certificate_id : null,
-        p_discount: Number(discount) || 0,
-        p_course_ids: Array.isArray(course_ids) ? course_ids : [],
-        p_installments: installments || [], 
-        p_location_id: locationIdStr
+    const { error } = await supabase.rpc('update_admission_full', {
+      p_admission_id: id,
+      p_student_name: student_name,
+      p_student_phone_number: student_phone_number,
+      p_father_name: father_name || null,
+      p_father_phone_number: father_phone_number || null,
+      p_permanent_address: permanent_address || null,
+      p_current_address: current_address || null,
+      p_identification_type: identification_type || null,
+      p_identification_number: identification_number || null,
+      p_date_of_admission: date_of_admission,
+      p_course_start_date: course_start_date || null,
+      p_batch_preference: batch_preference || null,
+      p_remarks: remarks || null,
+      p_certificate_id:
+        certificate_id && certificate_id.length > 20
+          ? certificate_id
+          : null,
+      p_discount: Number(discount) || 0,
+      p_course_ids: Array.isArray(course_ids) ? course_ids : [],
+      p_installments: installments || [],
+      p_location_id: locationIdStr,
     });
 
     if (error) throw error;
+
     res.status(200).json({ message: 'Admission updated successfully' });
   } catch (error) {
     console.error('Error updating admission:', error);
-    res.status(500).json({ error: error.message || 'Error updating admission.' });
+    res.status(500).json({
+      error: error.message || 'Error updating admission.',
+    });
+  }
+};
+
+exports.checkAdmissionByPhone = async (req, res) => {
+  try {
+    const { phone } = req.params;
+
+    const { data, error } = await supabase
+      .from('admissions')
+      .select('id, undertaking_completed')
+      .eq('student_phone_number', phone)
+      .maybeSingle();
+
+    if (error) {
+      console.error('Check Admission Error:', error);
+      return res.status(500).json({ error: 'Lookup failed' });
+    }
+
+    if (!data) {
+      return res.json({ mode: 'INTAKE' });
+    }
+
+    return res.json({
+      mode: 'ADMISSION',
+      admission_id: data.id,
+      undertaking_completed: data.undertaking_completed,
+    });
+
+  } catch (err) {
+    console.error('Check Admission Exception:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 };

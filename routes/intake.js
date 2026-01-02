@@ -38,4 +38,10 @@ router.get(
   intakeController.proceedToAdmission
 );
 
+router.put(
+  '/:id/finalize',
+  intakeController.finalizeIntake
+);
+
+
 module.exports = router;
