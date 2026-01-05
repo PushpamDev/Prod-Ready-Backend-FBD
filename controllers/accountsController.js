@@ -236,7 +236,7 @@ exports.getAccountDetails = async (req, res) => {
       coursesResult
     ] = await Promise.all([
       supabase.from('v_admission_financial_summary')
-              .select('student_name, admission_number, student_phone_number, branch') 
+              .select('student_id, student_name, admission_number, student_phone_number, branch') 
               .eq('admission_id', admissionId)
               .single(),
       supabase.from('v_installment_status') 
@@ -267,6 +267,7 @@ exports.getAccountDetails = async (req, res) => {
     const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount_paid), 0);
 
     const responseData = {
+      student_id: financials.student_id, // <-- ADD THIS LINE
       admission_number: financials.admission_number,
       name: financials.student_name,
       phones: [financials.student_phone_number],

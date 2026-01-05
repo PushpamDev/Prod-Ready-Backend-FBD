@@ -46,7 +46,7 @@ app.use("/api/skills", skillsRoutes);
 app.use("/api/free-slots", freeSlotsRoutes);
 app.use("/api/activities", activityRoutes);
 app.use("/api/users", userRoutes);
-app.use("/api/students", studentRoutes);
+app.use("/api/students", auth, studentRoutes);
 app.use("/api/suggestions", suggestionRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use("/api/announcements", announcementRoutes);

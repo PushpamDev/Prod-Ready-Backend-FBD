@@ -163,10 +163,52 @@ const getStudentBatches = async (req, res) => {
   }
 };
 
+// controllers/studentsController.js
+
+const setDefaulterStatus = async (req, res) => {
+  const { id } = req.params;
+  // If is_defaulter isn't in body (from mark-defaulter route), 
+  // we assume true if calling the mark route, or false if forced by middleware
+  const is_defaulter = req.body.is_defaulter !== undefined ? req.body.is_defaulter : true;
+  const { reason } = req.body;
+
+  try {
+    const updateData = { is_defaulter };
+
+    if (is_defaulter) {
+      updateData.defaulter_reason = reason || null;
+      updateData.defaulter_marked_at = new Date().toISOString();
+    } else {
+      updateData.defaulter_reason = null;
+      updateData.defaulter_marked_at = null;
+    }
+
+    const { data, error } = await supabase
+      .from('students')
+      .update(updateData)
+      .eq('id', id)
+      .select('id, is_defaulter, defaulter_reason')
+      .single();
+
+    if (error) throw error;
+
+    res.json({
+      is_defaulter: data.is_defaulter,
+      reason: data.defaulter_reason,
+      message: is_defaulter ? "Marked as defaulter" : "Removed from defaulters"
+    });
+  } catch (err) {
+    console.error("Defaulter update error:", err);
+    res.status(500).json({ error: "Failed to update defaulter status" });
+  }
+};
+
+
 module.exports = {
   getAllStudents,
   createStudent,
   updateStudent,
   deleteStudent,
   getStudentBatches,
+  setDefaulterStatus
 };
