@@ -44,6 +44,8 @@ exports.createIntake = async (req, res) => {
       identification_number,
       course_ids,
       fee_amount,
+      current_address,      // Added field
+      permanent_address     // Added field
     } = req.body;
 
     const { data, error } = await supabase
@@ -60,6 +62,8 @@ exports.createIntake = async (req, res) => {
         identification_number,
         course_ids,
         fee_amount,
+        current_address,    // Inserted to DB
+        permanent_address,  // Inserted to DB
         video_completed: false,
         contacts_acknowledged: false,
         terms_accepted: false,
@@ -87,13 +91,12 @@ exports.createIntake = async (req, res) => {
  * UPLOAD IDENTIFICATION FILES (MULTIPLE, APPEND)
  */
 exports.uploadIntakeFiles = [
-  upload.array('files'), // ✅ MUST match frontend: form.append('files', file)
+  upload.array('files'), 
   async (req, res) => {
     const { id } = req.params;
     const files = req.files;
 
     try {
-      /* -------------------- VALIDATION -------------------- */
       if (!id) {
         return res.status(400).json({ error: 'Missing intake ID' });
       }
@@ -102,7 +105,6 @@ exports.uploadIntakeFiles = [
         return res.status(400).json({ error: 'No files provided' });
       }
 
-      /* -------------------- FETCH INTAKE -------------------- */
       const { data: intake, error: fetchError } = await supabase
         .from('admission_intakes')
         .select('id, identification_files')
@@ -119,7 +121,6 @@ exports.uploadIntakeFiles = [
 
       const uploadedFiles = [];
 
-      /* -------------------- UPLOAD FILES -------------------- */
       for (const file of files) {
         const safeFileName = file.originalname.replace(/\s+/g, '_');
         const filePath = `intakes/${id}/${crypto.randomUUID()}_${safeFileName}`;
@@ -143,7 +144,6 @@ exports.uploadIntakeFiles = [
         });
       }
 
-      /* -------------------- UPDATE DB -------------------- */
       const { error: updateError } = await supabase
         .from('admission_intakes')
         .update({
@@ -156,7 +156,6 @@ exports.uploadIntakeFiles = [
         throw updateError;
       }
 
-      /* -------------------- RESPONSE -------------------- */
       return res.status(200).json({
         success: true,
         uploaded_count: uploadedFiles.length,
@@ -171,6 +170,7 @@ exports.uploadIntakeFiles = [
     }
   },
 ];
+
 /**
  * LIST ALL INTAKES
  */
@@ -216,7 +216,9 @@ exports.proceedToAdmission = async (req, res) => {
         identification_type: data.identification_type,
         identification_number: data.identification_number,
         course_ids: data.course_ids,
-        course_start_date: data.date_of_joining
+        course_start_date: data.date_of_joining,
+        current_address: data.current_address,    // Added to prefill
+        permanent_address: data.permanent_address  // Added to prefill
       }
     });
 
@@ -233,7 +235,6 @@ exports.finalizeIntake = async (req, res) => {
   const { id } = req.params;
 
   try {
-    /* 1️⃣ Fetch intake */
     const { data: intake, error: fetchError } = await supabase
       .from('admission_intakes')
       .select('id, status')
@@ -244,15 +245,13 @@ exports.finalizeIntake = async (req, res) => {
       return res.status(404).json({ error: 'Intake not found' });
     }
 
-    /* 2️⃣ Prevent double finalization */
-      if (intake.status === 'submitted') {
+    if (intake.status === 'submitted') {
       return res.status(200).json({
         success: true,
         message: 'Already submitted',
       });
     }
 
-    /* 3️⃣ Validate flags */
     const {
       video_completed,
       contacts_acknowledged,
@@ -269,7 +268,6 @@ exports.finalizeIntake = async (req, res) => {
       });
     }
 
-    /* 4️⃣ Finalize intake (NO FILE HANDLING HERE) */
     const { error: updateError } = await supabase
       .from('admission_intakes')
       .update({
@@ -283,7 +281,6 @@ exports.finalizeIntake = async (req, res) => {
 
     if (updateError) throw updateError;
 
-    /* 5️⃣ Success */
     return res.status(200).json({
       success: true,
       mode: 'INTAKE',
