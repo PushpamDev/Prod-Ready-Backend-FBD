@@ -83,13 +83,17 @@ exports.getBatchAllotmentList = async (req, res) => {
 };
 
 /* ===========================================================
-   UPDATE BATCH ALLOTMENT (SAFE FOR MULTI-BATCH)
+   UPDATE BATCH ALLOTMENT (CONTROLLER FIX)
    =========================================================== */
 exports.updateBatchAllotment = async (req, res) => {
   const { admissionId } = req.params;
   const { joined, joining_date, remarks } = req.body;
+  
+  // ✅ Switch to username for better readability and to avoid FK errors
+  const staffIdentifier = req.user?.username || req.user?.id || 'System'; 
 
   try {
+    // 1. Update main admission
     const { error: admissionErr } = await supabase
       .from('admissions')
       .update({
@@ -101,12 +105,42 @@ exports.updateBatchAllotment = async (req, res) => {
 
     if (admissionErr) throw admissionErr;
 
-    res.json({ success: true });
+    // 2. Log History
+    if (remarks && remarks.trim() !== "") {
+      const { error: historyErr } = await supabase
+        .from('admission_remarks')
+        .insert({
+            admission_id: admissionId,
+            remark_text: remarks,
+            created_by: staffIdentifier // Now saving 'pushpam' or 'admin' instead of a UUID
+        });
+      
+      if (historyErr) {
+        console.error("Remark History Log Failed:", historyErr);
+      }
+    }
 
+    res.json({ success: true });
   } catch (err) {
     console.error('Batch Allotment Update Error:', err);
-    res.status(500).json({
-      error: 'Failed to update batch allotment',
-    });
+    res.status(500).json({ error: 'Failed to update batch allotment' });
+  }
+};
+
+
+exports.getRemarkHistory = async (req, res) => {
+  const { admissionId } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from('admission_remarks')
+      .select('remark_text, created_at, created_by')
+      .eq('admission_id', admissionId)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error('Fetch History Error:', err);
+    res.status(500).json({ error: 'Failed to fetch history' });
   }
 };

@@ -5,5 +5,5 @@ const controller = require('../controllers/batchAllotmentController');
 
 router.get('/', auth, controller.getBatchAllotmentList);
 router.put('/:admissionId', auth, controller.updateBatchAllotment);
-
+router.get('/history/:admissionId', auth, controller.getRemarkHistory);
 module.exports = router;

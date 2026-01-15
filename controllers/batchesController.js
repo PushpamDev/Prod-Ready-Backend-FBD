@@ -426,6 +426,22 @@ const getActiveStudentsCount = async (req, res) => {
   }
 };
 
+const getRemarkHistory = async (req, res) => {
+  const { admissionId } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from('admission_remarks')
+      .select('remark_text, created_at, created_by')
+      .eq('admission_id', admissionId)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch history' });
+  }
+};
+
 module.exports = {
   getAllBatches,
   createBatch,
@@ -433,4 +449,5 @@ module.exports = {
   deleteBatch,
   getBatchStudents,
   getActiveStudentsCount,
+  getRemarkHistory,
 };
