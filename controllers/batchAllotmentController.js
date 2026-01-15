@@ -3,10 +3,14 @@ const supabase = require('../db');
 /* ===========================================================
    GET BATCH ALLOTMENT LIST (MULTI-BATCH SAFE)
    =========================================================== */
+
 exports.getBatchAllotmentList = async (req, res) => {
   try {
+    // ✅ CAPTURE SEARCH FROM QUERY PARAMS
+    const { search = '' } = req.query;
+
     /* -------------------- 1️⃣ Base admission data -------------------- */
-    const { data: admissions, error } = await supabase
+    let query = supabase
       .from('v_admission_financial_summary')
       .select(`
         admission_id,
@@ -15,16 +19,18 @@ exports.getBatchAllotmentList = async (req, res) => {
         student_name,
         student_phone_number,
         courses_str,
-        date_of_admission,
-        approval_status
-      `)
-      .order('date_of_admission', { ascending: false });
+        date_of_admission
+      `);
+
+    // ✅ APPLY SEARCH FILTER ON DATABASE LEVEL
+    if (search) {
+      query = query.or(`student_name.ilike.%${search}%,admission_number.ilike.%${search}%,student_phone_number.ilike.%${search}%`);
+    }
+
+    const { data: admissions, error } = await query.order('date_of_admission', { ascending: false });
 
     if (error) throw error;
-
-    if (!admissions || admissions.length === 0) {
-      return res.json([]);
-    }
+    if (!admissions || admissions.length === 0) return res.json([]);
 
     const admissionIds = admissions.map(a => a.admission_id);
     const studentIds = admissions.map(a => a.student_id);
@@ -37,17 +43,12 @@ exports.getBatchAllotmentList = async (req, res) => {
 
     if (metaErr) throw metaErr;
 
-    const metaMap = Object.fromEntries(
-      (admissionMeta || []).map(a => [a.id, a])
-    );
+    const metaMap = Object.fromEntries((admissionMeta || []).map(a => [a.id, a]));
 
-    /* -------------------- 3️⃣ Batch mappings (MANY-TO-MANY) -------------------- */
+    /* -------------------- 3️⃣ Batch mappings -------------------- */
     const { data: batchRows, error: batchErr } = await supabase
       .from('batch_students')
-      .select(`
-        student_id,
-        batches ( name )
-      `)
+      .select(`student_id, batches ( name )`)
       .in('student_id', studentIds);
 
     if (batchErr) throw batchErr;
@@ -65,26 +66,19 @@ exports.getBatchAllotmentList = async (req, res) => {
         admission_number: row.admission_number,
         student_name: row.student_name,
         student_phone_number: row.student_phone_number,
-
         course_name: row.courses_str,
-
-        // ✅ FIX: guaranteed admission date
-        admission_date: row.date_of_admission || row.created_at,
-
+        admission_date: row.date_of_admission,
         batch_names: batchMap[row.student_id] || [],
-
         joined: metaMap[row.admission_id]?.joined ?? false,
         joining_date: metaMap[row.admission_id]?.course_start_date ?? null,
         remarks: metaMap[row.admission_id]?.remarks ?? '',
-        }));
+    }));
 
     res.json(result);
 
   } catch (err) {
     console.error('Batch Allotment Fetch Error:', err);
-    res.status(500).json({
-      error: 'Failed to load batch allotment list',
-    });
+    res.status(500).json({ error: 'Failed to load batch allotment list' });
   }
 };
 
