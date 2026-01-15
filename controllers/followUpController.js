@@ -6,77 +6,73 @@ const { format } = require('date-fns');
  * [UPDATED] Filters 'Today', searches by Admission Number, and automatically fetches new columns.
  */
 exports.getFollowUpTasks = async (req, res) => {
-  const { 
-    dateFilter, // 'today', 'overdue', 'upcoming'
-    searchTerm,
-    batchName,
-    assignedTo,
-    dueAmountMin,
-    startDate,
-    endDate 
-  } = req.query;
+  const { dateFilter, searchTerm, batchName, assignedTo, dueAmountMin, startDate, endDate } = req.query;
 
   try {
-    // 1. Select * from the view. 
-    // Since we updated the SQL view, this '*' now includes 'admission_number' and 'last_log_created_at'
-    let query = supabase
-      .from('v_follow_up_task_list')
-      .select('*');
-
     const today = format(new Date(), 'yyyy-MM-dd');
 
-    // 2. Date Filter Tabs
+    // ✅ Helper for common filters (excluding date-specific logic)
+    const buildBaseFilters = (q) => {
+      q = q.gt('total_due_amount', 0); // Exclude paid students
+      if (searchTerm) {
+        q = q.or(`student_name.ilike.%${searchTerm}%,student_phone.ilike.%${searchTerm}%,admission_number.ilike.%${searchTerm}%`);
+      }
+      if (batchName) q = q.eq('batch_name', batchName);
+      if (assignedTo) q = q.eq('assigned_to', assignedTo);
+      if (dueAmountMin) q = q.gte('total_due_amount', dueAmountMin);
+      return q;
+    };
+
+    // ✅ 1. Today's Count Logic: Due today AND not processed yet today
+    let todayQ = supabase.from('v_follow_up_task_list').select('*', { count: 'exact', head: true });
+    todayQ = buildBaseFilters(todayQ)
+      .eq('next_task_due_date', today)
+      .or(`last_log_created_at.is.null,last_log_created_at.lt.${today}`);
+
+    // ✅ 2. Overdue Count Logic: Due before today
+    let overdueQ = supabase.from('v_follow_up_task_list').select('*', { count: 'exact', head: true });
+    overdueQ = buildBaseFilters(overdueQ).lt('next_task_due_date', today);
+
+    // ✅ 3. Upcoming Count Logic: Due after today
+    let upcomingQ = supabase.from('v_follow_up_task_list').select('*', { count: 'exact', head: true });
+    upcomingQ = buildBaseFilters(upcomingQ).gt('next_task_due_date', today);
+
+    const [todayRes, overdueRes, upcomingRes] = await Promise.all([todayQ, overdueQ, upcomingQ]);
+
+    // ✅ 4. Fetch the actual list data
+    let dataQuery = supabase.from('v_follow_up_task_list').select('*');
+    dataQuery = buildBaseFilters(dataQuery);
+
     if (dateFilter === 'today') {
-      // Logic A: The task is officially scheduled for today
-      query = query.eq('next_task_due_date', today);
-      
-      // Logic B: HIDE the task if a log was already created "Today".
-      // We check if 'last_log_created_at' is NULL (never called) OR was created BEFORE today (yesterday or older).
-      query = query.or(`last_log_created_at.is.null,last_log_created_at.lt.${today}`);
-      
+      dataQuery = dataQuery.eq('next_task_due_date', today)
+                           .or(`last_log_created_at.is.null,last_log_created_at.lt.${today}`);
     } else if (dateFilter === 'overdue') {
-      query = query.lt('next_task_due_date', today);
+      dataQuery = dataQuery.lt('next_task_due_date', today);
     } else if (dateFilter === 'upcoming') {
-      query = query.gt('next_task_due_date', today);
+      dataQuery = dataQuery.gt('next_task_due_date', today);
     }
 
-    // 3. Search Term (Includes Admission Number Search)
-    if (searchTerm) {
-      // This works because we added admission_number to the view
-      query = query.or(`student_name.ilike.%${searchTerm}%,student_phone.ilike.%${searchTerm}%,admission_number.ilike.%${searchTerm}%`);
-    }
+    // Handle Custom Date Range
+    if (startDate) dataQuery = dataQuery.gte('next_task_due_date', startDate);
+    if (endDate) dataQuery = dataQuery.lte('next_task_due_date', endDate);
 
-    // 4. Advanced Filters
-    if (batchName) {
-      query = query.eq('batch_name', batchName);
-    }
-    if (assignedTo) {
-      query = query.eq('assigned_to', assignedTo);
-    }
-    if (dueAmountMin) {
-      query = query.gte('total_due_amount', dueAmountMin);
-    }
-    
-    // 5. Custom Date Range
-    if (startDate) {
-      query = query.gte('next_task_due_date', startDate);
-    }
-    if (endDate) {
-      query = query.lte('next_task_due_date', endDate);
-    }
-
-    // 6. Execute
-    const { data, error } = await query.order('next_task_due_date', { ascending: true });
+    const { data, error } = await dataQuery.order('next_task_due_date', { ascending: true });
 
     if (error) throw error;
 
-    res.status(200).json(data);
+    res.status(200).json({
+      tasks: data || [],
+      counts: {
+        today: todayRes.count || 0,
+        overdue: overdueRes.count || 0,
+        upcoming: upcomingRes.count || 0
+      }
+    });
   } catch (error) {
-    console.error('Error fetching follow-up tasks:', error);
+    console.error('Error:', error);
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
-
 
 exports.createFollowUpLog = async (req, res) => {
   const {
