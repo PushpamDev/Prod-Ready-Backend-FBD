@@ -13,7 +13,7 @@ exports.getAdmissionsForAccounts = async (req, res) => {
     let query = supabase
       .from('v_admission_financial_summary') 
       .select(
-        'admission_id, student_name, student_phone_number, created_at, total_payable_amount, total_paid, remaining_due, approval_status, status, base_amount'
+        'admission_number, admission_id, student_name, student_phone_number, created_at, total_payable_amount, total_paid, remaining_due, approval_status, status, base_amount'
       );
 
     if (status && status !== 'All') {
@@ -31,6 +31,7 @@ exports.getAdmissionsForAccounts = async (req, res) => {
     if (error) throw error;
 
     const formattedData = data.map((adm) => ({
+      admission_number: adm.admission_number,
       id: adm.admission_id,
       name: adm.student_name || 'N/A',
       admission_date: adm.created_at,
@@ -148,18 +149,17 @@ exports.rejectAdmission = async (req, res) => {
  */
 exports.recordPayment = async (req, res) => {
   const { admission_id, amount_paid, payment_date, method, notes } = req.body;
-  const user_id = req.user?.id;
+  // This must come from your Auth Middleware
+  const user_id = req.user?.id; 
 
   if (!admission_id || !amount_paid || !payment_date || !method || !user_id) {
     return res.status(400).json({
-      error: 'admission_id, amount_paid, payment_date, method, and user_id are required.',
+      error: 'Missing required fields. Ensure you are logged in.',
     });
   }
 
   try {
-    /* ----------------------------------------
-       1. Generate receipt number (RPC)
-    ---------------------------------------- */
+    // 1. Generate receipt number
     const { data: receiptNumber, error: receiptError } =
       await supabase.rpc('generate_receipt_number');
 
@@ -167,9 +167,7 @@ exports.recordPayment = async (req, res) => {
       throw new Error('Failed to generate receipt number');
     }
 
-    /* ----------------------------------------
-       2. Insert payment ONCE
-    ---------------------------------------- */
+    // 2. Insert payment with the logged-in user's ID
     const { data: paymentData, error: paymentError } = await supabase
       .from('payments')
       .insert({
@@ -179,33 +177,24 @@ exports.recordPayment = async (req, res) => {
         method,
         receipt_number: receiptNumber,
         notes,
-        created_by: user_id,
+        created_by: user_id, // This UUID links to your users/profiles table
       })
       .select('id')
       .single();
 
     if (paymentError) throw paymentError;
 
-    /* ----------------------------------------
-       3. Apply payment to installments
-    ---------------------------------------- */
+    // 3. Apply payment to installments (RPC)
     const { error: updateError } = await supabase.rpc(
       'apply_payment_to_installments',
-      {
-        p_payment_id: paymentData.id,
-      }
+      { p_payment_id: paymentData.id }
     );
 
     if (updateError) {
       console.error('Installment update failed:', updateError);
-      return res.status(500).json({
-        error: 'Payment recorded, but failed to update installments.',
-      });
+      return res.status(500).json({ error: 'Payment recorded, but installment update failed.' });
     }
 
-    /* ----------------------------------------
-       4. Success
-    ---------------------------------------- */
     res.status(201).json({
       message: 'Payment recorded successfully.',
       payment_id: paymentData.id,
@@ -214,15 +203,12 @@ exports.recordPayment = async (req, res) => {
 
   } catch (error) {
     console.error('Error recording payment:', error);
-    res.status(500).json({
-      error: 'An error occurred while recording the payment.',
-    });
+    res.status(500).json({ error: 'An error occurred while recording the payment.' });
   }
 };
-
 /**
  * @description Get details for the Accounts detail page.
- * [UPDATED] Now includes 'admission_number' for the UI.
+ * Manually joins with public.users to show which staff member recorded the payment.
  */
 exports.getAccountDetails = async (req, res) => {
   const { admissionId } = req.params;
@@ -244,7 +230,7 @@ exports.getAccountDetails = async (req, res) => {
               .eq('admission_id', admissionId)
               .order('due_date', { ascending: true }),
       supabase.from('payments')
-              .select('id, payment_date, amount_paid, method, receipt_number, notes')
+              .select('id, payment_date, amount_paid, method, receipt_number, notes, created_by')
               .eq('admission_id', admissionId)
               .order('payment_date', { ascending: true }),
       supabase.from('admission_courses')
@@ -257,22 +243,50 @@ exports.getAccountDetails = async (req, res) => {
     if (paymentsResult.error) throw paymentsResult.error;
     if (coursesResult.error) throw coursesResult.error;
 
+    // --- STAFF LOOKUP LOGIC ---
+    const rawPayments = paymentsResult.data || [];
+    let paymentsWithStaff = [];
+
+    if (rawPayments.length > 0) {
+      // 1. Get unique UUIDs of staff from the payments
+      const staffIds = [...new Set(rawPayments.map(p => p.created_by).filter(Boolean))];
+
+      // 2. Fetch usernames from the 'users' table
+      const { data: userData, error: userError } = await supabase
+        .from('users') 
+        .select('id, username')
+        .in('id', staffIds);
+
+      if (userError) {
+        console.warn("Could not fetch staff usernames:", userError);
+      }
+
+      // 3. Create a mapping of { id: username }
+      const staffMap = {};
+      (userData || []).forEach(u => {
+        staffMap[u.id] = u.username;
+      });
+
+      // 4. Combine payment data with the username
+      paymentsWithStaff = rawPayments.map(p => ({
+        ...p,
+        collected_by: staffMap[p.created_by] || 'System' // This matches the key in your Dialog UI
+      }));
+    }
+
     const financials = financialsResult.data;
     const installments = installmentsResult.data || [];
-    const payments = paymentsResult.data || [];
 
-    // --- FIX: Dynamic Calculation ---
-    // Calculate total fees from installments directly to ensure UI consistency
     const calculatedTotalFees = installments.reduce((sum, inst) => sum + Number(inst.amount_due), 0);
-    const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount_paid), 0);
+    const totalPaid = paymentsWithStaff.reduce((sum, p) => sum + Number(p.amount_paid), 0);
 
     const responseData = {
-      student_id: financials.student_id, // <-- ADD THIS LINE
+      student_id: financials.student_id,
       admission_number: financials.admission_number,
       name: financials.student_name,
       phones: [financials.student_phone_number],
       branch: financials.branch,
-      total_fees: calculatedTotalFees, // Forced match with installments
+      total_fees: calculatedTotalFees,
       total_paid: totalPaid,
       balance: calculatedTotalFees - totalPaid,
       installments: installments.map(inst => ({
@@ -281,7 +295,7 @@ exports.getAccountDetails = async (req, res) => {
         amount: inst.amount_due, 
         status: inst.status
       })),
-      payments: payments,
+      payments: paymentsWithStaff, // Now contains 'collected_by' string
       courses: (coursesResult.data || []).map(c => c.courses.name)
     };
 
@@ -292,7 +306,6 @@ exports.getAccountDetails = async (req, res) => {
     res.status(500).json({ error: 'An unexpected server error occurred.' });
   }
 };
-
 /**
  * @description Get data needed to generate a receipt for a specific payment.
  */

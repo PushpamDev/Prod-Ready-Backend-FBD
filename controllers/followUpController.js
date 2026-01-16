@@ -78,9 +78,9 @@ exports.createFollowUpLog = async (req, res) => {
   const {
     admission_id,
     notes,
-    next_follow_up_date, // Date for the *next* task
-    type,                // 'Call', 'SMS', etc.
-    lead_type            // 'Hot', 'Warm', 'Cold'
+    next_follow_up_date, 
+    type,                
+    lead_type            
   } = req.body;
 
   const user_id = req.user?.id; 
@@ -90,23 +90,44 @@ exports.createFollowUpLog = async (req, res) => {
   }
 
   try {
-    const { data, error } = await supabase
+    // 1. Insert the follow-up log
+    const { data: followUp, error: insertError } = await supabase
       .from('follow_ups')
       .insert({
         admission_id,
-        user_id,
+        user_id, // Storing the UUID
         notes: notes || '',
         follow_up_date: new Date().toISOString(), 
         next_follow_up_date: next_follow_up_date || null,
         type: type || 'Call',
         lead_type: lead_type || null
       })
-      .select('id')
+      .select('*') // Select all to get the inserted record
       .single();
 
-    if (error) throw error;
+    if (insertError) throw insertError;
 
-    res.status(201).json({ message: "Follow-up log saved.", data });
+    // 2. Fetch the username for the user_id from the 'users' table
+    const { data: userData, error: userError } = await supabase
+      .from('users')
+      .select('username')
+      .eq('id', user_id)
+      .single();
+
+    if (userError) {
+      console.warn("Follow-up saved, but could not fetch username:", userError);
+    }
+
+    // 3. Construct the response with the staff username
+    const responseData = {
+      ...followUp,
+      staff_name: userData?.username || 'System'
+    };
+
+    res.status(201).json({ 
+      message: "Follow-up log saved.", 
+      data: responseData 
+    });
   } catch (error) {
     console.error('Error creating follow-up log:', error);
     if (error.code === '23503') {
@@ -124,19 +145,49 @@ exports.getFollowUpHistoryForAdmission = async (req, res) => {
   }
 
   try {
-    const { data, error } = await supabase
+    // 1. Fetch logs. Ensure 'user_id' is selected from the view/table
+    const { data: logs, error: logsError } = await supabase
       .from('follow_up_details') 
-      .select('*') // Includes 'admission_number' from the updated view
+      .select('*, user_id') // Explicitly select user_id to ensure it's available for lookup
       .eq('admission_id', admissionId)
       .order('log_date', { ascending: false });
 
-    if (error) throw error;
+    if (logsError) throw logsError;
+    if (!logs || logs.length === 0) return res.status(200).json([]);
 
-    if (!data) {
-      return res.status(200).json([]);
+    // 2. Extract unique staff UUIDs (checking both user_id and staff_id as fallbacks)
+    const staffIds = [...new Set(logs.map(log => log.user_id || log.staff_id).filter(Boolean))];
+
+    let staffMap = {};
+
+    if (staffIds.length > 0) {
+      // 3. Look up usernames from public.users table
+      const { data: staffData, error: staffError } = await supabase
+        .from('users')
+        .select('id, username')
+        .in('id', staffIds);
+
+      if (staffError) {
+        console.error('Error fetching staff names for history:', staffError);
+      } else {
+        // Create lookup object: { "uuid-123": "pushpam" }
+        staffData.forEach(user => {
+          staffMap[user.id] = user.username;
+        });
+      }
     }
 
-    res.status(200).json(data);
+    // 4. Map usernames back to the logs
+    const formattedHistory = logs.map(log => {
+      const currentStaffId = log.user_id || log.staff_id;
+      return {
+        ...log,
+        // Match the ID to the username, fallback to 'System' if no match found
+        staff_name: staffMap[currentStaffId] || 'System' 
+      };
+    });
+
+    res.status(200).json(formattedHistory);
   } catch (error) {
     console.error('Error fetching follow-up history:', error);
     res.status(500).json({ error: 'An unexpected error occurred.' });
