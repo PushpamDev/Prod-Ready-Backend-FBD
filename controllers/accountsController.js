@@ -1,28 +1,35 @@
 // controllers/accountsController.js
 const supabase = require('../db');
 
-// --- Helper for new receipt number ---
-
 /**
  * @description Get admissions list for the approval page or general accounts view.
+ * Filtered by the staff's locationId for security and clarity.
  */
 exports.getAdmissionsForAccounts = async (req, res) => {
   const { status = 'Approved', search = '' } = req.query; 
+  const locationId = req.locationId; // Extracted from Auth Middleware
+
+  if (!locationId) {
+    return res.status(401).json({ error: 'Location context missing. Please re-login.' });
+  }
 
   try {
     let query = supabase
       .from('v_admission_financial_summary') 
       .select(
-        'admission_number, admission_id, student_name, student_phone_number, created_at, total_payable_amount, total_paid, remaining_due, approval_status, status, base_amount'
-      );
+        'admission_number, admission_id, student_name, student_phone_number, created_at, total_payable_amount, total_paid, remaining_due, approval_status, status, base_amount, location_id'
+      )
+      .eq('location_id', locationId); // <--- CRITICAL FILTER: Scopes view to branch
 
+    // Apply Approval Status filter
     if (status && status !== 'All') {
       query = query.eq('approval_status', status);
     }
 
+    // Apply Search filter
     if (search) {
       query = query.or(
-        `student_name.ilike.%${search}%,student_phone_number.ilike.%${search}%`
+        `student_name.ilike.%${search}%,student_phone_number.ilike.%${search}%,admission_number.ilike.%${search}%`
       );
     }
 
@@ -145,29 +152,39 @@ exports.rejectAdmission = async (req, res) => {
 };
 
 /**
- * @description Record a payment for an admission.
+ * Helper: Converts numeric amount to Indian Rupee Words
+ */
+const numToWords = (n) => {
+  const a = ['', 'One ', 'Two ', 'Three ', 'Four ', 'Five ', 'Six ', 'Seven ', 'Eight ', 'Nine ', 'Ten ', 'Eleven ', 'Twelve ', 'Thirteen ', 'Fourteen ', 'Fifteen ', 'Sixteen ', 'Seventeen ', 'Eighteen ', 'Nineteen '];
+  const b = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+  if ((n = n.toString()).length > 9) return 'Amount too large';
+  let nArray = ('000000000' + n).substr(-9).match(/^(\d{2})(\d{2})(\d{2})(\d{1})(\d{2})$/);
+  if (!nArray) return '';
+  let str = '';
+  str += (nArray[1] != 0) ? (b[nArray[1][0]] || a[nArray[1]]) + (b[nArray[1][0]] ? ' ' + a[nArray[1]] : '') + 'Crore ' : '';
+  str += (nArray[2] != 0) ? (b[nArray[2][0]] || a[nArray[2]]) + (b[nArray[2][0]] ? ' ' + a[nArray[2]] : '') + 'Lakh ' : '';
+  str += (nArray[3] != 0) ? (b[nArray[3][0]] || a[nArray[3]]) + (b[nArray[3][0]] ? ' ' + a[nArray[3]] : '') + 'Thousand ' : '';
+  str += (nArray[4] != 0) ? a[nArray[4]] + 'Hundred ' : '';
+  str += (nArray[5] != 0) ? ((str != '') ? 'and ' : '') + (b[nArray[5][0]] || a[nArray[5]]) + (b[nArray[5][0]] ? ' ' + a[nArray[5]] : '') : '';
+  return str.trim() + ' Rupees Only';
+};
+
+/**
+ * UPDATED: Record payment and sync with receipts table
  */
 exports.recordPayment = async (req, res) => {
   const { admission_id, amount_paid, payment_date, method, notes } = req.body;
-  // This must come from your Auth Middleware
-  const user_id = req.user?.id; 
+  const user_id = req.user?.id;
 
   if (!admission_id || !amount_paid || !payment_date || !method || !user_id) {
-    return res.status(400).json({
-      error: 'Missing required fields. Ensure you are logged in.',
-    });
+    return res.status(400).json({ error: 'Missing required fields.' });
   }
 
   try {
-    // 1. Generate receipt number
-    const { data: receiptNumber, error: receiptError } =
-      await supabase.rpc('generate_receipt_number');
+    const { data: receiptNumber, error: receiptError } = await supabase.rpc('generate_receipt_number');
+    if (receiptError || !receiptNumber) throw new Error('Failed to generate receipt number');
 
-    if (receiptError || !receiptNumber) {
-      throw new Error('Failed to generate receipt number');
-    }
-
-    // 2. Insert payment with the logged-in user's ID
+    // 1. Insert into payments table
     const { data: paymentData, error: paymentError } = await supabase
       .from('payments')
       .insert({
@@ -177,30 +194,34 @@ exports.recordPayment = async (req, res) => {
         method,
         receipt_number: receiptNumber,
         notes,
-        created_by: user_id, // This UUID links to your users/profiles table
+        created_by: user_id,
       })
-      .select('id')
-      .single();
+      .select('id').single();
 
     if (paymentError) throw paymentError;
 
-    // 3. Apply payment to installments (RPC)
-    const { error: updateError } = await supabase.rpc(
-      'apply_payment_to_installments',
-      { p_payment_id: paymentData.id }
-    );
+    // 2. Apply to installments via RPC
+    const { error: updateError } = await supabase.rpc('apply_payment_to_installments', { 
+      p_payment_id: paymentData.id 
+    });
 
-    if (updateError) {
-      console.error('Installment update failed:', updateError);
-      return res.status(500).json({ error: 'Payment recorded, but installment update failed.' });
-    }
+    if (updateError) console.error('Installment update failed:', updateError);
+
+    // 3. NEW: Sync with receipts table so it's no longer empty
+    await supabase.from('receipts').insert({
+        admission_id,
+        receipt_number: receiptNumber,
+        amount_paid: parseFloat(amount_paid),
+        payment_date,
+        payment_method: method,
+        generated_by: user_id
+    });
 
     res.status(201).json({
       message: 'Payment recorded successfully.',
       payment_id: paymentData.id,
       receipt_number: receiptNumber,
     });
-
   } catch (error) {
     console.error('Error recording payment:', error);
     res.status(500).json({ error: 'An error occurred while recording the payment.' });
@@ -307,97 +328,83 @@ exports.getAccountDetails = async (req, res) => {
   }
 };
 /**
- * @description Get data needed to generate a receipt for a specific payment.
+ * UPDATED: Get data for receipt with prediction logic
  */
 exports.getReceiptData = async (req, res) => {
-    const { paymentId } = req.params;
-    if (!paymentId) {
-        return res.status(400).json({ error: 'Payment ID is required.' });
+  const { paymentId } = req.params;
+  if (!paymentId) return res.status(400).json({ error: 'Payment ID is required.' });
+
+  try {
+    const { data: payment, error: payError } = await supabase
+      .from('payments')
+      .select(`
+        *,
+        admissions (
+          id, date_of_admission, gst_rate, is_gst_exempt, total_payable_amount,
+          father_name, current_address,
+          students ( name, phone_number, admission_number, batch_students ( batches ( name ) ) ),
+          admission_courses ( courses ( name, price ) ),
+          installments ( id, due_date, amount, status )
+        )
+      `)
+      .eq('id', paymentId)
+      .single();
+
+    if (payError || !payment || !payment.admissions) {
+      return res.status(404).json({ error: 'Payment or associated admission not found.' });
     }
-     try {
-        const { data: payment, error: payError } = await supabase
-            .from('payments')
-            .select(`
-                *,
-                admissions (
-                    id, 
-                    date_of_admission, 
-                    gst_rate, 
-                    is_gst_exempt, 
-                    total_payable_amount,
-                    batch_preference,
-                    father_name,
-                    current_address,
-                    students ( 
-                        name, 
-                        phone_number, 
-                        admission_number,
-                        batch_students ( batches ( name ) ) 
-                    ),
-                    admission_courses ( courses ( name, price ) )
-                )
-            `)
-            .eq('id', paymentId)
-            .single();
 
-        if (payError) {
-            console.error("Supabase query failed:", payError);
-            throw payError;
-        }
-        
-        const admissionData = payment.admissions;
-        if (!payment || !admissionData) {
-            return res.status(404).json({ error: 'Payment or associated admission not found.' });
-        }
-        
-        const studentData = admissionData.students;
-        const coursesData = admissionData.admission_courses;
+    const admissionData = payment.admissions;
+    const studentData = admissionData.students;
 
-        const batchData = studentData?.batch_students || [];
-        const actualBatches = batchData.map(bs => bs.batches?.name).filter(Boolean);
-        const batchString = actualBatches.length > 0 ? actualBatches.join(', ') : 'Not Allotted';
+    // --- PREDICTION LOGIC ---
+    // Find the next upcoming installment that isn't paid
+    const nextInst = (admissionData.installments || [])
+      .filter(i => i.status !== 'Paid')
+      .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime())[0];
 
-        let gstBreakdown = { cgst: 0, sgst: 0, totalGst: 0, rate: 0 };
-        let taxableAmount = payment.amount_paid;
-         if (!admissionData.is_gst_exempt && admissionData.gst_rate > 0) {
-            const rate = admissionData.gst_rate / 100;
-            taxableAmount = payment.amount_paid / (1 + rate);
-            const totalGst = payment.amount_paid - taxableAmount;
-            gstBreakdown = {
-                cgst: totalGst / 2,
-                sgst: totalGst / 2,
-                totalGst: totalGst,
-                rate: admissionData.gst_rate
-            };
-        }
+    // Batch Formatting
+    const batchString = studentData?.batch_students?.map(bs => bs.batches?.name).filter(Boolean).join(', ') || 'Not Allotted';
 
-        const receiptData = {
-             receipt_number: payment.receipt_number,
-            payment_date: payment.payment_date,
-            payment_method: payment.method,
-            amount_paid: payment.amount_paid,
-            amount_in_words: "Placeholder - Implement amount to words function",
-            
-            notes: payment.notes, 
-            
-            admission_id: admissionData.id, 
-            student_name: studentData?.name,
-            student_phone: studentData?.phone_number,
-            father_name: admissionData.father_name,
-            address: admissionData.current_address,
-            id_card_no: studentData?.admission_number, 
-            admission_batch: batchString,
-            
-            admission_date: admissionData.date_of_admission,
-            courses: coursesData?.map(c => c.courses?.name).join(', ') || 'N/A',
-            
-            taxable_amount: taxableAmount,
-            gst_summary: gstBreakdown,
-            total_payable_admission: admissionData.total_payable_amount,
-        };
-        res.status(200).json(receiptData);
-    } catch(error) {
-        console.error(`Error fetching receipt data for payment ${paymentId}:`, error);
-        res.status(500).json({ error: 'An unexpected server error occurred.', details: error.message });
+    // GST logic
+    let gstBreakdown = { cgst: 0, sgst: 0, totalGst: 0, rate: admissionData.gst_rate || 0 };
+    let taxableAmount = Number(payment.amount_paid);
+    
+    if (!admissionData.is_gst_exempt && admissionData.gst_rate > 0) {
+      const rate = admissionData.gst_rate / 100;
+      taxableAmount = payment.amount_paid / (1 + rate);
+      const totalGst = payment.amount_paid - taxableAmount;
+      gstBreakdown = { cgst: totalGst / 2, sgst: totalGst / 2, totalGst, rate: admissionData.gst_rate };
     }
+
+    const receiptData = {
+      receipt_number: payment.receipt_number,
+      payment_date: payment.payment_date,
+      payment_method: payment.method,
+      amount_paid: payment.amount_paid,
+      amount_in_words: numToWords(Math.floor(payment.amount_paid)),
+      notes: payment.notes,
+      admission_id: admissionData.id,
+      student_name: studentData?.name,
+      student_phone: studentData?.phone_number,
+      id_card_no: studentData?.admission_number,
+      admission_batch: batchString,
+      courses: admissionData.admission_courses?.map(c => c.courses?.name).join(', ') || 'N/A',
+      taxable_amount: taxableAmount.toFixed(2),
+      gst_summary: gstBreakdown,
+      total_payable_admission: admissionData.total_payable_amount,
+      
+      // Predicted Next Payment Info
+      prediction: {
+        next_due_date: nextInst ? nextInst.due_date : null,
+        next_due_amount: nextInst ? nextInst.amount : 0,
+        is_fully_paid: !nextInst
+      }
+    };
+
+    res.status(200).json(receiptData);
+  } catch (error) {
+    console.error(`Error fetching receipt data:`, error);
+    res.status(500).json({ error: 'Server error occurred.', details: error.message });
+  }
 };

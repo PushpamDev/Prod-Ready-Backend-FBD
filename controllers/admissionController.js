@@ -4,39 +4,32 @@ const supabase = require('../db');
 
 /**
  * @description
- * Get Admission Dashboard rows (FLAT STRUCTURE).
- * RPC `get_admission_dashboard` returns TABLE (rows).
- * Metrics are calculated separately for clarity and stability.
+ * Get Admission Dashboard rows filtered by Location.
  */
 exports.getAllAdmissions = async (req, res) => {
+  const locationId = req.locationId; // From auth middleware
+
   try {
     const searchTerm = req.query.search || '';
 
     /* ----------------------- 1. FETCH ROW DATA ----------------------- */
-    const { data: rows, error } = await supabase.rpc(
-      'get_admission_dashboard',
-      { search_term: searchTerm }
-    );
+    // We use the View we fixed earlier because it's already location-indexed
+    let query = supabase
+      .from('v_admission_financial_summary')
+      .select('*')
+      .eq('location_id', locationId); // CRITICAL: Security Filter
 
-    if (error) {
-      console.error('RPC Error:', error);
-      throw error;
+    if (searchTerm) {
+      query = query.or(`student_name.ilike.%${searchTerm}%,student_phone_number.ilike.%${searchTerm}%,admission_number.ilike.%${searchTerm}%`);
     }
 
-    const safeRows = Array.isArray(rows) ? rows : [];
+    const { data: rows, error } = await query.order('created_at', { ascending: false });
 
-    /* ----------------------- 2. ENRICH ROW DATA ----------------------- */
-    const enrichedRows = safeRows.map((r) => ({
-      ...r,
+    if (error) throw error;
 
-      // ✅ Backend is authoritative for undertaking status
-      undertaking_status:
-        r.approval_status === 'Approved'
-          ? 'Completed'
-          : 'Pending',
-    }));
+    const safeRows = rows || [];
 
-    /* ----------------------- 3. CALCULATE METRICS ---------------------- */
+    /* ----------------------- 2. CALCULATE METRICS ---------------------- */
     const now = new Date();
     const currentMonth = now.getMonth();
     const currentYear = now.getFullYear();
@@ -47,54 +40,45 @@ exports.getAllAdmissions = async (req, res) => {
     let admissionsThisMonth = 0;
     let overdueCount = 0;
 
-    enrichedRows.forEach((r) => {
+    const enrichedRows = safeRows.map((r) => {
       const createdAt = new Date(r.created_at);
 
       totalCollected += Number(r.total_paid || 0);
-      totalOutstanding += Number(r.balance_due || 0);
+      totalOutstanding += Number(r.remaining_due || 0);
 
-      if (
-        createdAt.getMonth() === currentMonth &&
-        createdAt.getFullYear() === currentYear
-      ) {
+      if (createdAt.getMonth() === currentMonth && createdAt.getFullYear() === currentYear) {
         admissionsThisMonth += 1;
         revenueCollectedThisMonth += Number(r.total_paid || 0);
       }
 
-      if (r.status === 'Overdue') {
+      // Check for overdue via the status column in your summary view
+      if (r.status === 'Pending' && new Date(r.next_task_due_date) < now) {
         overdueCount += 1;
       }
+
+      return {
+        ...r,
+        undertaking_status: r.approval_status === 'Approved' ? 'Completed' : 'Pending',
+      };
     });
 
-    const metrics = {
-      totalAdmissions: enrichedRows.length,
-      admissionsThisMonth,
-      totalCollected,
-      revenueCollectedThisMonth,
-      totalOutstanding,
-      overdueCount,
-    };
-
-    /* ----------------------- 4. SEND RESPONSE ------------------------- */
     res.status(200).json({
-      metrics,
-      admissions: enrichedRows, // ✅ frontend-safe
+      metrics: {
+        totalAdmissions: enrichedRows.length,
+        admissionsThisMonth,
+        totalCollected,
+        revenueCollectedThisMonth,
+        totalOutstanding,
+        overdueCount,
+      },
+      admissions: enrichedRows,
     });
 
   } catch (error) {
     console.error('Error fetching dashboard data:', error);
-
-    if (error.code === '42883') {
-      return res.status(500).json({
-        error:
-          "Database function 'get_admission_dashboard' not found or signature mismatch.",
-      });
-    }
-
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
-
 /**
  * @description
  * Get a single admission with all related details
@@ -152,7 +136,7 @@ exports.getAdmissionById = async (req, res) => {
 /**
  * @description
  * Create a new admission using RPC.
- * Undertaking status is DB-driven (Pending / Completed).
+ * This version ensures installments are passed as a JSONB array to populate the installments table.
  */
 exports.createAdmission = async (req, res) => {
   const {
@@ -184,33 +168,24 @@ exports.createAdmission = async (req, res) => {
     });
   }
 
-  if (!student_name || !student_phone_number) {
+  // Basic Required Fields
+  if (!student_name || !student_phone_number || !date_of_admission) {
     return res.status(400).json({
-      error: 'Student Name and Phone Number are required.',
+      error: 'Student Name, Phone Number, and Admission Date are required.',
     });
   }
 
-  if (!date_of_admission) {
-    return res.status(400).json({
-      error: 'Date of Admission is required.',
-    });
-  }
-
+  // Course Validation
   if (!Array.isArray(course_ids) || course_ids.length === 0) {
     return res.status(400).json({
       error: 'At least one course must be selected.',
     });
   }
 
-  if (!Array.isArray(installments)) {
+  // Installment Validation (Crucial for the new table logic)
+  if (!Array.isArray(installments) || installments.length === 0) {
     return res.status(400).json({
-      error: 'Installments must be provided as an array.',
-    });
-  }
-
-  if (discount && isNaN(parseFloat(discount))) {
-    return res.status(400).json({
-      error: 'Discount must be a valid number.',
+      error: 'Installment schedule is required for financial tracking.',
     });
   }
 
@@ -221,22 +196,24 @@ exports.createAdmission = async (req, res) => {
       {
         p_student_name: student_name,
         p_student_phone_number: student_phone_number,
-        p_father_name: father_name,
-        p_father_phone_number: father_phone_number,
-        p_permanent_address: permanent_address,
-        p_current_address: current_address,
+        p_father_name: father_name || null,
+        p_father_phone_number: father_phone_number || null,
+        p_permanent_address: permanent_address || null,
+        p_current_address: current_address || null,
         p_identification_type: identification_type || null,
         p_identification_number: identification_number || null,
         p_date_of_admission: date_of_admission,
         p_course_start_date: course_start_date || null,
         p_batch_preference: batch_preference || null,
-        p_remarks: remarks,
-        p_certificate_id: certificate_id || null,
-        p_discount: discount || 0,
+        p_remarks: remarks || null,
+        // Ensure UUID is valid or null
+        p_certificate_id: (certificate_id && certificate_id !== 'null') ? certificate_id : null,
+        p_discount: Number(discount) || 0,
         p_course_ids: course_ids,
-        p_installments: installments,
+        // This is passed as JSONB - SQL function will iterate through this
+        p_installments: installments, 
         p_location_id: locationId,
-        p_source_intake_id: source_intake_id || null, // ✅ drives undertaking status
+        p_source_intake_id: source_intake_id || null, 
       }
     );
 
@@ -249,15 +226,10 @@ exports.createAdmission = async (req, res) => {
   } catch (error) {
     console.error('Error creating admission:', error);
 
-    if (error.message?.includes('GST rate not configured')) {
-      return res.status(500).json({
-        error: 'Server configuration error: GST rate is not set.',
-      });
-    }
-
+    // Handle the specific "signature mismatch" if you haven't run the DROP/CREATE SQL yet
     if (error.code === '42883') {
       return res.status(500).json({
-        error: 'Database function signature mismatch. Please update the SQL function.',
+        error: 'Database function signature mismatch. Please ensure you ran the DROP and CREATE FUNCTION SQL commands.',
       });
     }
 
@@ -275,6 +247,7 @@ exports.createAdmission = async (req, res) => {
 exports.updateAdmission = async (req, res) => {
   const { id } = req.params;
 
+  // Security Gate
   if (req.user?.username !== 'pushpam') {
     return res.status(403).json({
       error: "Access denied. Only 'pushpam' can edit admissions.",
@@ -297,12 +270,17 @@ exports.updateAdmission = async (req, res) => {
     certificate_id,
     discount,
     course_ids,
-    installments,
+    installments, // Ensure this is coming from the frontend edit modal
   } = req.body;
 
   const locationIdStr = req.locationId ? String(req.locationId) : null;
 
   try {
+    // Basic validation for installments
+    if (installments && !Array.isArray(installments)) {
+      return res.status(400).json({ error: "Installments must be an array." });
+    }
+
     const { error } = await supabase.rpc('update_admission_full', {
       p_admission_id: id,
       p_student_name: student_name,
@@ -317,13 +295,13 @@ exports.updateAdmission = async (req, res) => {
       p_course_start_date: course_start_date || null,
       p_batch_preference: batch_preference || null,
       p_remarks: remarks || null,
-      p_certificate_id:
-        certificate_id && certificate_id.length > 20
-          ? certificate_id
-          : null,
+      // Handle Supabase/UUID length or null string from frontend
+      p_certificate_id: (certificate_id && certificate_id !== 'null' && certificate_id.length > 20) 
+        ? certificate_id 
+        : null,
       p_discount: Number(discount) || 0,
       p_course_ids: Array.isArray(course_ids) ? course_ids : [],
-      p_installments: installments || [],
+      p_installments: installments || [], // Passing the JSONB array
       p_location_id: locationIdStr,
     });
 
