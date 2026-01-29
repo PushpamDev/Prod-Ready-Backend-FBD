@@ -2,32 +2,36 @@
 const supabase = require('../db');
 
 exports.getDashboardData = async (req, res) => {
-  // ✅ Capture all filter parameters from the frontend
+  // ✅ 1. Capture the branch ID from the auth middleware or headers
+  // Usually, your auth middleware should attach this to req.user or req.locationId
+  const userLocationId = req.locationId || req.user?.location_id; 
   const { search = '', status, batch, undertaking } = req.query;
 
+  if (!userLocationId) {
+    return res.status(403).json({ error: 'Access denied: No branch location assigned to user.' });
+  }
+
   try {
+    // Start query on the summary view
     let query = supabase
       .from('v_admission_financial_summary')
-      .select('*');
+      .select('*')
+      // ✅ 2. STRICT BRANCH FILTER: Only show data belonging to this staff's branch
+      .eq('location_id', userLocationId); 
 
-    // ✅ APPLY FILTERS DIRECTLY IN THE DATABASE QUERY
-    
-    // 1. Fee Status Filter (Paid, Overdue, Pending)
+    // ✅ APPLY OPTIONAL FILTERS
     if (status && status !== 'all') {
       query = query.eq('status', status);
     }
 
-    // 2. Batch Name Filter
     if (batch && batch !== 'all') {
       query = query.eq('batch_name', batch);
     }
 
-    // 3. Undertaking Status Filter
     if (undertaking && undertaking !== 'all') {
       query = query.eq('undertaking_status', undertaking);
     }
 
-    // 4. Search Filter (Student Name, Admission No, or Phone)
     if (search) {
       query = query.or(`student_name.ilike.%${search}%,admission_number.ilike.%${search}%,student_phone_number.ilike.%${search}%`);
     }
@@ -40,7 +44,7 @@ exports.getDashboardData = async (req, res) => {
     const currentMonth = now.getMonth();
     const currentYear = now.getFullYear();
 
-    // ✅ Calculate Metrics based on the FILTERED data
+    // ✅ Metrics are now calculated ONLY from the filtered branch data
     const metrics = {
       totalAdmissions: data.length,
 
