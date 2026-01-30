@@ -3,23 +3,24 @@ const { format } = require('date-fns');
 
 /**
  * @description Get the task list for the main follow-up dashboard.
- * [UPDATED] Filters results by branch using req.locationId from auth middleware.
+ * [UPDATED] Added 'pushpam' override for global view.
  */
 exports.getFollowUpTasks = async (req, res) => {
   const { dateFilter, searchTerm, batchName, assignedTo, dueAmountMin, startDate, endDate } = req.query;
-  const locationId = req.locationId; // Captured from Auth Middleware
-
-  if (!locationId) {
-    return res.status(403).json({ error: 'Unauthorized: No branch assigned to this user.' });
-  }
+  const locationId = req.locationId;
+  const isPushpam = req.user?.username === 'pushpam';
 
   try {
     const today = format(new Date(), 'yyyy-MM-dd');
 
-    // ✅ Helper for common filters including the critical location filter
     const buildBaseFilters = (q) => {
-      q = q.eq('location_id', locationId) // Enforcement of branch-specific data
-           .gt('total_due_amount', 0);    // Exclude fully paid students
+      // ✅ Security: Only filter by location if NOT pushpam
+      if (!isPushpam) {
+        if (!locationId) throw new Error('LOCATION_REQUIRED');
+        q = q.eq('location_id', locationId);
+      }
+      
+      q = q.gt('total_due_amount', 0);
       
       if (searchTerm) {
         q = q.or(`student_name.ilike.%${searchTerm}%,student_phone.ilike.%${searchTerm}%,admission_number.ilike.%${searchTerm}%`);
@@ -30,23 +31,18 @@ exports.getFollowUpTasks = async (req, res) => {
       return q;
     };
 
-    // ✅ 1. Today's Count Logic
-    let todayQ = supabase.from('v_follow_up_task_list').select('*', { count: 'exact', head: true });
-    todayQ = buildBaseFilters(todayQ)
-      .eq('next_task_due_date', today)
-      .or(`last_log_created_at.is.null,last_log_created_at.lt.${today}`);
+    // 1-3. Fetch Counts
+    const [todayRes, overdueRes, upcomingRes] = await Promise.all([
+      buildBaseFilters(supabase.from('v_follow_up_task_list').select('*', { count: 'exact', head: true }))
+        .eq('next_task_due_date', today)
+        .or(`last_log_created_at.is.null,last_log_created_at.lt.${today}`),
+      buildBaseFilters(supabase.from('v_follow_up_task_list').select('*', { count: 'exact', head: true }))
+        .lt('next_task_due_date', today),
+      buildBaseFilters(supabase.from('v_follow_up_task_list').select('*', { count: 'exact', head: true }))
+        .gt('next_task_due_date', today)
+    ]);
 
-    // ✅ 2. Overdue Count Logic
-    let overdueQ = supabase.from('v_follow_up_task_list').select('*', { count: 'exact', head: true });
-    overdueQ = buildBaseFilters(overdueQ).lt('next_task_due_date', today);
-
-    // ✅ 3. Upcoming Count Logic
-    let upcomingQ = supabase.from('v_follow_up_task_list').select('*', { count: 'exact', head: true });
-    upcomingQ = buildBaseFilters(upcomingQ).gt('next_task_due_date', today);
-
-    const [todayRes, overdueRes, upcomingRes] = await Promise.all([todayQ, overdueQ, upcomingQ]);
-
-    // ✅ 4. Fetch the filtered list data
+    // 4. Fetch actual list
     let dataQuery = supabase.from('v_follow_up_task_list').select('*');
     dataQuery = buildBaseFilters(dataQuery);
 
@@ -76,17 +72,21 @@ exports.getFollowUpTasks = async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching tasks:', error);
+    if (error.message === 'LOCATION_REQUIRED') {
+      return res.status(403).json({ error: 'Unauthorized: No branch assigned.' });
+    }
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
 
 /**
  * @description Create a follow-up log.
- * [UPDATED] Validates branch security before insertion.
+ * [FIXED] Handles UUID types and prevents 'Admission not found' errors.
  */
 exports.createFollowUpLog = async (req, res) => {
   const { admission_id, notes, next_follow_up_date, type, lead_type } = req.body;
   const user_id = req.user?.id;
+  const username = req.user?.username;
   const locationId = req.locationId;
 
   if (!admission_id || !user_id) {
@@ -94,17 +94,29 @@ exports.createFollowUpLog = async (req, res) => {
   }
 
   try {
-    // Branch Security Check: Ensure the admission belongs to the same branch
-    const { data: check, error: checkErr } = await supabase
+    // 1. Fetch the admission to check branch security
+    const { data: admission, error: fetchErr } = await supabase
       .from('admissions')
       .select('location_id')
-      .eq('id', admission_id)
-      .single();
+      .eq('id', admission_id) // Ensure frontend sends a valid UUID
+      .maybeSingle();
 
-    if (checkErr || check.location_id !== locationId) {
-      return res.status(403).json({ error: 'Forbidden: You can only log follow-ups for your branch.' });
+    if (fetchErr) throw fetchErr;
+    if (!admission) {
+      return res.status(404).json({ error: `Admission record [${admission_id}] not found in database.` });
     }
 
+    // 2. Security Gate
+    const isPushpam = username === 'pushpam';
+    const isSameBranch = admission.location_id && locationId && (Number(admission.location_id) === Number(locationId));
+
+    if (!isPushpam && !isSameBranch) {
+      return res.status(403).json({ 
+        error: `Access Denied. Branch mismatch (Student: ${admission.location_id}, User: ${locationId})` 
+      });
+    }
+
+    // 3. Insert Follow-up
     const { data: followUp, error: insertError } = await supabase
       .from('follow_ups')
       .insert({
@@ -121,6 +133,7 @@ exports.createFollowUpLog = async (req, res) => {
 
     if (insertError) throw insertError;
 
+    // 4. Return with staff name
     const { data: userData } = await supabase.from('users').select('username').eq('id', user_id).single();
 
     res.status(201).json({ 
@@ -129,7 +142,7 @@ exports.createFollowUpLog = async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating follow-up log:', error);
-    res.status(500).json({ error: 'An error occurred while creating the follow-up log.' });
+    res.status(500).json({ error: error.message || 'Internal server error.' });
   }
 };
 
@@ -151,9 +164,8 @@ exports.getFollowUpHistoryForAdmission = async (req, res) => {
       .order('log_date', { ascending: false });
 
     if (logsError) throw logsError;
-    if (!logs || logs.length === 0) return res.status(200).json([]);
 
-    const staffIds = [...new Set(logs.map(log => log.user_id || log.staff_id).filter(Boolean))];
+    const staffIds = [...new Set((logs || []).map(log => log.user_id).filter(Boolean))];
     let staffMap = {};
 
     if (staffIds.length > 0) {
@@ -167,14 +179,14 @@ exports.getFollowUpHistoryForAdmission = async (req, res) => {
       });
     }
 
-    const formattedHistory = logs.map(log => ({
+    const formattedHistory = (logs || []).map(log => ({
       ...log,
-      staff_name: staffMap[log.user_id || log.staff_id] || 'System' 
+      staff_name: staffMap[log.user_id] || 'System' 
     }));
 
     res.status(200).json(formattedHistory);
   } catch (error) {
-    console.error('Error fetching follow-up history:', error);
+    console.error('Error fetching history:', error);
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };

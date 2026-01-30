@@ -235,6 +235,7 @@ exports.finalizeIntake = async (req, res) => {
   const { id } = req.params;
 
   try {
+    // 1. Fetch current intake status
     const { data: intake, error: fetchError } = await supabase
       .from('admission_intakes')
       .select('id, status')
@@ -242,7 +243,7 @@ exports.finalizeIntake = async (req, res) => {
       .single();
 
     if (fetchError || !intake) {
-      return res.status(404).json({ error: 'Intake not found' });
+      return res.status(404).json({ error: 'Intake record not found' });
     }
 
     if (intake.status === 'submitted') {
@@ -258,16 +259,22 @@ exports.finalizeIntake = async (req, res) => {
       terms_accepted,
     } = req.body;
 
-    if (
-      video_completed !== 'true' ||
-      contacts_acknowledged !== 'true' ||
-      terms_accepted !== 'true'
-    ) {
+    /**
+     * FIX: Use loose equality or check for truthy values.
+     * This handles both boolean true AND the string "true".
+     */
+    const isVideoDone = video_completed === true || video_completed === 'true';
+    const isContactsDone = contacts_acknowledged === true || contacts_acknowledged === 'true';
+    const isTermsDone = terms_accepted === true || terms_accepted === 'true';
+
+    if (!isVideoDone || !isContactsDone || !isTermsDone) {
       return res.status(400).json({
         error: 'All undertaking steps must be completed',
+        received: { video_completed, contacts_acknowledged, terms_accepted } // Useful for debugging
       });
     }
 
+    // 2. Perform the update
     const { error: updateError } = await supabase
       .from('admission_intakes')
       .update({
@@ -287,11 +294,11 @@ exports.finalizeIntake = async (req, res) => {
       intake_id: id,
     });
 
-
   } catch (err) {
     console.error('Finalize Intake Error:', err);
     return res.status(500).json({
       error: 'Failed to finalize intake',
+      details: err.message
     });
   }
 };
