@@ -4,8 +4,8 @@ const supabase = require("../db");
 /**
  * @description 
  * Fetches comprehensive executive metrics for Pushpam.
- * Includes revenue, overdue tasks, ticket support, and 30-day collection predictions.
- * Updated to support location-aware views for accurate branch-level filtering.
+ * Includes revenue, overdue tasks, ticket support, and period-specific collection predictions.
+ * [UPDATED] Metrics now dynamically align with the selected 'from' and 'to' date range.
  */
 exports.getCEODashboard = async (req, res) => {
   // --- Security Check ---
@@ -38,13 +38,7 @@ exports.getCEODashboard = async (req, res) => {
     // Helper to apply location filter if targetLocationId exists
     const applyLoc = (query) => (targetLocationId ? query.eq('location_id', targetLocationId) : query);
 
-    // 2. Define Date Range for Predictions (Next 30 Days from Today)
-    const todayStr = new Date().toISOString().split('T')[0];
-    const thirtyDaysLater = new Date();
-    thirtyDaysLater.setDate(thirtyDaysLater.getDate() + 30);
-    const futureLimitStr = thirtyDaysLater.toISOString().split('T')[0];
-
-    // 3. Parallel Execution for High Performance
+    // 2. Parallel Execution for High Performance
     const [
       studentsRes,
       batchesRes,
@@ -61,30 +55,30 @@ exports.getCEODashboard = async (req, res) => {
       // B. Active Batches
       applyLoc(supabase.from("batches").select("id").eq("status", "active")),
       
-      // C. Revenue using the new location-aware View
+      // C. Revenue Collected in the selected period
       applyLoc(supabase.from("v_payments_with_location").select("amount_paid, method"))
         .gte("payment_date", from)
         .lte("payment_date", to),
       
-      // D. Support Tickets (Assumes tickets table has location_id)
+      // D. Support Tickets in the selected period
       applyLoc(supabase.from("tickets").select("status"))
         .gte("created_at", from)
         .lte("created_at", to),
 
-      // E. Outstanding Debt using corrected View (v_admission_financial_summary now includes location_id)
+      // E. Outstanding Debt (Current Snapshot)
       applyLoc(supabase.from("v_admission_financial_summary").select("remaining_due, status")),
 
-      // F. Overdue Tasks using corrected View (v_follow_up_task_list now includes location_id)
+      // F. Overdue Tasks list for the operations count
       applyLoc(supabase.from("v_follow_up_task_list").select("next_task_due_date")),
 
       // G. Faculty Stats
       applyLoc(supabase.from("faculty").select("id, is_active")),
 
-      // H. Financial Prediction using the new location-aware Installment View
+      // H. UPDATED: Prediction based on the SELECTED date range instead of hardcoded 30 days
       applyLoc(supabase.from("v_installments_with_location").select("amount"))
         .neq("status", "Paid")
-        .gte("due_date", todayStr)
-        .lte("due_date", futureLimitStr)
+        .gte("due_date", from)
+        .lte("due_date", to)
     ]);
 
     // --- AGGREGATION & DATA PROCESSING ---
@@ -100,7 +94,7 @@ exports.getCEODashboard = async (req, res) => {
         revenueInPeriod: paymentsRes.data?.reduce((sum, p) => sum + Number(p.amount_paid || 0), 0) || 0,
         totalOutstandingDebt: financialsRes.data?.reduce((sum, a) => sum + Number(a.remaining_due || 0), 0) || 0,
         
-        // The Prediction: Sum of upcoming unpaid installments from the new View
+        // UPDATED: Now represents expected collections for the SPECIFIC period chosen in the UI
         predictedRevenue: projectedRes.data?.reduce((sum, i) => sum + Number(i.amount || 0), 0) || 0,
         
         paymentMethods: paymentsRes.data?.reduce((acc, p) => {
@@ -109,8 +103,8 @@ exports.getCEODashboard = async (req, res) => {
         }, {}) || {}
       },
       operations: {
-        // Overdue count from branch-filtered task list
-        overdueCollectionsCount: followUpsRes.data?.filter(f => f.next_task_due_date && f.next_task_due_date < todayStr).length || 0,
+        // UPDATED: Count tasks overdue relative to the END of the selected period ('to')
+        overdueCollectionsCount: followUpsRes.data?.filter(f => f.next_task_due_date && f.next_task_due_date < to).length || 0,
         
         admissionStatusBreakdown: financialsRes.data?.reduce((acc, a) => {
           acc[a.status] = (acc[a.status] || 0) + 1;

@@ -3,38 +3,33 @@ const supabase = require('../db');
 
 /**
  * @description Get admissions list for the approval page or general accounts view.
- * Filtered by the staff's locationId for security and clarity.
+ * Scoped by location_id with a global override for 'pushpam'.
  */
 exports.getAdmissionsForAccounts = async (req, res) => {
   const { status = 'Approved', search = '' } = req.query; 
-  const locationId = req.locationId; // Extracted from Auth Middleware
-
-  if (!locationId) {
-    return res.status(401).json({ error: 'Location context missing. Please re-login.' });
-  }
+  const locationId = req.locationId;
+  const isPushpam = req.user?.username === 'pushpam';
 
   try {
     let query = supabase
       .from('v_admission_financial_summary') 
-      .select(
-        'admission_number, admission_id, student_name, student_phone_number, created_at, total_payable_amount, total_paid, remaining_due, approval_status, status, base_amount, location_id'
-      )
-      .eq('location_id', locationId); // <--- CRITICAL FILTER: Scopes view to branch
+      .select('admission_number, admission_id, student_name, student_phone_number, created_at, total_payable_amount, total_paid, remaining_due, approval_status, status, base_amount, location_id');
 
-    // Apply Approval Status filter
+    // ✅ Branch Security: Apply location filter unless user is Pushpam
+    if (!isPushpam) {
+      if (!locationId) return res.status(401).json({ error: 'Location context missing.' });
+      query = query.eq('location_id', locationId);
+    }
+
     if (status && status !== 'All') {
       query = query.eq('approval_status', status);
     }
 
-    // Apply Search filter
     if (search) {
-      query = query.or(
-        `student_name.ilike.%${search}%,student_phone_number.ilike.%${search}%,admission_number.ilike.%${search}%`
-      );
+      query = query.or(`student_name.ilike.%${search}%,student_phone_number.ilike.%${search}%,admission_number.ilike.%${search}%`);
     }
 
     const { data, error } = await query.order('created_at', { ascending: false });
-
     if (error) throw error;
 
     const formattedData = data.map((adm) => ({
@@ -170,21 +165,27 @@ const numToWords = (n) => {
 };
 
 /**
- * UPDATED: Record payment and sync with receipts table
+ * @description Record payment and sync across payments and receipts tables.
  */
 exports.recordPayment = async (req, res) => {
   const { admission_id, amount_paid, payment_date, method, notes } = req.body;
   const user_id = req.user?.id;
+  const locationId = req.locationId;
 
   if (!admission_id || !amount_paid || !payment_date || !method || !user_id) {
     return res.status(400).json({ error: 'Missing required fields.' });
   }
 
   try {
+    // 1. Verify branch before recording payment
+    const { data: adm } = await supabase.from('admissions').select('location_id').eq('id', admission_id).single();
+    if (req.user?.username !== 'pushpam' && Number(adm?.location_id) !== Number(locationId)) {
+      return res.status(403).json({ error: 'Cannot record payment for another branch.' });
+    }
+
     const { data: receiptNumber, error: receiptError } = await supabase.rpc('generate_receipt_number');
     if (receiptError || !receiptNumber) throw new Error('Failed to generate receipt number');
 
-    // 1. Insert into payments table
     const { data: paymentData, error: paymentError } = await supabase
       .from('payments')
       .insert({
@@ -200,28 +201,21 @@ exports.recordPayment = async (req, res) => {
 
     if (paymentError) throw paymentError;
 
-    // 2. Apply to installments via RPC
-    const { error: updateError } = await supabase.rpc('apply_payment_to_installments', { 
-      p_payment_id: paymentData.id 
-    });
+    // 2. Automated Installment Balancing
+    await supabase.rpc('apply_payment_to_installments', { p_payment_id: paymentData.id });
 
-    if (updateError) console.error('Installment update failed:', updateError);
-
-    // 3. NEW: Sync with receipts table so it's no longer empty
+    // 3. Receipt Sync
     await supabase.from('receipts').insert({
         admission_id,
         receipt_number: receiptNumber,
         amount_paid: parseFloat(amount_paid),
         payment_date,
         payment_method: method,
-        generated_by: user_id
+        generated_by: user_id,
+        location_id: adm.location_id // Ensure receipt knows its branch
     });
 
-    res.status(201).json({
-      message: 'Payment recorded successfully.',
-      payment_id: paymentData.id,
-      receipt_number: receiptNumber,
-    });
+    res.status(201).json({ message: 'Payment recorded successfully.', payment_id: paymentData.id, receipt_number: receiptNumber });
   } catch (error) {
     console.error('Error recording payment:', error);
     res.status(500).json({ error: 'An error occurred while recording the payment.' });
@@ -229,11 +223,20 @@ exports.recordPayment = async (req, res) => {
 };
 /**
  * @description Get details for the Accounts detail page.
- * Manually joins with public.users to show which staff member recorded the payment.
+ * [UPDATED] Validates UUID syntax and enforces branch-level security.
  */
 exports.getAccountDetails = async (req, res) => {
   const { admissionId } = req.params;
-  if (!admissionId) return res.status(400).json({ error: 'Admission ID is required.' });
+  const locationId = req.locationId; // From Auth Middleware
+  const isPushpam = req.user?.username === 'pushpam';
+
+  // ✅ 1. Validate UUID syntax to prevent "invalid input syntax for type uuid" error
+  if (!admissionId || admissionId === 'undefined') {
+    return res.status(400).json({ 
+      error: 'Invalid Admission ID.', 
+      details: 'The ID received was undefined or missing. Please refresh the page and try again.' 
+    });
+  }
 
   try {
     const [
@@ -242,8 +245,9 @@ exports.getAccountDetails = async (req, res) => {
       paymentsResult,
       coursesResult
     ] = await Promise.all([
+      // Added location_id to the select for security check
       supabase.from('v_admission_financial_summary')
-              .select('student_id, student_name, admission_number, student_phone_number, branch') 
+              .select('student_id, student_name, admission_number, student_phone_number, branch, location_id') 
               .eq('admission_id', admissionId)
               .single(),
       supabase.from('v_installment_status') 
@@ -259,45 +263,44 @@ exports.getAccountDetails = async (req, res) => {
               .eq('admission_id', admissionId)
     ]);
 
+    // Handle initial database errors
     if (financialsResult.error) throw financialsResult.error;
     if (installmentsResult.error) throw installmentsResult.error;
     if (paymentsResult.error) throw paymentsResult.error;
     if (coursesResult.error) throw coursesResult.error;
+
+    const financials = financialsResult.data;
+
+    // ✅ 2. Branch Security Gate: 
+    // Only allow access if the branch matches OR user is pushpam
+    if (!isPushpam && Number(financials.location_id) !== Number(locationId)) {
+      return res.status(403).json({ error: 'Access denied: This record belongs to another branch.' });
+    }
 
     // --- STAFF LOOKUP LOGIC ---
     const rawPayments = paymentsResult.data || [];
     let paymentsWithStaff = [];
 
     if (rawPayments.length > 0) {
-      // 1. Get unique UUIDs of staff from the payments
       const staffIds = [...new Set(rawPayments.map(p => p.created_by).filter(Boolean))];
 
-      // 2. Fetch usernames from the 'users' table
       const { data: userData, error: userError } = await supabase
         .from('users') 
         .select('id, username')
         .in('id', staffIds);
 
-      if (userError) {
-        console.warn("Could not fetch staff usernames:", userError);
-      }
+      if (userError) console.warn("Could not fetch staff usernames:", userError);
 
-      // 3. Create a mapping of { id: username }
       const staffMap = {};
-      (userData || []).forEach(u => {
-        staffMap[u.id] = u.username;
-      });
+      (userData || []).forEach(u => { staffMap[u.id] = u.username; });
 
-      // 4. Combine payment data with the username
       paymentsWithStaff = rawPayments.map(p => ({
         ...p,
-        collected_by: staffMap[p.created_by] || 'System' // This matches the key in your Dialog UI
+        collected_by: staffMap[p.created_by] || 'System'
       }));
     }
 
-    const financials = financialsResult.data;
     const installments = installmentsResult.data || [];
-
     const calculatedTotalFees = installments.reduce((sum, inst) => sum + Number(inst.amount_due), 0);
     const totalPaid = paymentsWithStaff.reduce((sum, p) => sum + Number(p.amount_paid), 0);
 
@@ -316,22 +319,30 @@ exports.getAccountDetails = async (req, res) => {
         amount: inst.amount_due, 
         status: inst.status
       })),
-      payments: paymentsWithStaff, // Now contains 'collected_by' string
-      courses: (coursesResult.data || []).map(c => c.courses.name)
+      payments: paymentsWithStaff,
+      courses: (coursesResult.data || []).map(c => c.courses?.name).filter(Boolean)
     };
 
     res.status(200).json(responseData);
 
   } catch (error) {
     console.error(`Error fetching account details:`, error);
+    // Specifically catch Postgres UUID type errors to give better feedback
+    if (error.code === '22P02') {
+      return res.status(400).json({ error: 'Invalid ID format.', details: 'The system expected a UUID but received something else.' });
+    }
     res.status(500).json({ error: 'An unexpected server error occurred.' });
   }
 };
 /**
- * UPDATED: Get data for receipt with prediction logic
+ * @description Get comprehensive data for receipt generation.
+ * Restored to include full student profile and financial breakdown.
  */
 exports.getReceiptData = async (req, res) => {
   const { paymentId } = req.params;
+  const locationId = req.locationId; 
+  const isPushpam = req.user?.username === 'pushpam';
+
   if (!paymentId) return res.status(400).json({ error: 'Payment ID is required.' });
 
   try {
@@ -339,44 +350,71 @@ exports.getReceiptData = async (req, res) => {
       .from('payments')
       .select(`
         *,
-        admissions (
-          id, date_of_admission, gst_rate, is_gst_exempt, total_payable_amount,
-          father_name, current_address,
-          students ( name, phone_number, admission_number, batch_students ( batches ( name ) ) ),
+        admissions!payments_admission_id_fkey (
+          id, 
+          date_of_admission, 
+          gst_rate, 
+          is_gst_exempt, 
+          total_payable_amount,
+          father_name, 
+          current_address, 
+          location_id,
+          students ( 
+            name, 
+            phone_number, 
+            admission_number,
+            batch_students ( batches ( name ) )
+          ),
           admission_courses ( courses ( name, price ) ),
-          installments ( id, due_date, amount, status )
+          installments!installments_admission_id_fkey ( id, due_date, amount, status )
         )
       `)
       .eq('id', paymentId)
-      .single();
+      .maybeSingle();
 
     if (payError || !payment || !payment.admissions) {
+      console.error("Receipt Query Error:", payError);
       return res.status(404).json({ error: 'Payment or associated admission not found.' });
     }
 
     const admissionData = payment.admissions;
     const studentData = admissionData.students;
 
-    // --- PREDICTION LOGIC ---
-    // Find the next upcoming installment that isn't paid
+    // --- BRANCH SECURITY GATE ---
+    if (!isPushpam && Number(admissionData.location_id) !== Number(locationId)) {
+      return res.status(403).json({ error: 'Access denied: Branch mismatch.' });
+    }
+
+    // --- AGGREGATION & LOGIC ---
+    
+    // 1. Prediction Logic (Next Pending Installment)
     const nextInst = (admissionData.installments || [])
       .filter(i => i.status !== 'Paid')
       .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime())[0];
 
-    // Batch Formatting
-    const batchString = studentData?.batch_students?.map(bs => bs.batches?.name).filter(Boolean).join(', ') || 'Not Allotted';
+    // 2. Batch Formatting
+    const batchString = studentData?.batch_students
+      ?.map(bs => bs.batches?.name)
+      .filter(Boolean)
+      .join(', ') || 'Not Allotted';
 
-    // GST logic
+    // 3. GST & Taxable Amount Calculation
     let gstBreakdown = { cgst: 0, sgst: 0, totalGst: 0, rate: admissionData.gst_rate || 0 };
     let taxableAmount = Number(payment.amount_paid);
     
     if (!admissionData.is_gst_exempt && admissionData.gst_rate > 0) {
-      const rate = admissionData.gst_rate / 100;
-      taxableAmount = payment.amount_paid / (1 + rate);
+      const rateMultiplier = admissionData.gst_rate / 100;
+      taxableAmount = payment.amount_paid / (1 + rateMultiplier);
       const totalGst = payment.amount_paid - taxableAmount;
-      gstBreakdown = { cgst: totalGst / 2, sgst: totalGst / 2, totalGst, rate: admissionData.gst_rate };
+      gstBreakdown = { 
+        cgst: totalGst / 2, 
+        sgst: totalGst / 2, 
+        totalGst, 
+        rate: admissionData.gst_rate 
+      };
     }
 
+    // --- FINAL RESPONSE MAPPING ---
     const receiptData = {
       receipt_number: payment.receipt_number,
       payment_date: payment.payment_date,
@@ -389,12 +427,15 @@ exports.getReceiptData = async (req, res) => {
       student_phone: studentData?.phone_number,
       id_card_no: studentData?.admission_number,
       admission_batch: batchString,
+      admission_date: admissionData.date_of_admission,
+      father_name: admissionData.father_name || 'N/A',
+      address: admissionData.current_address || 'N/A',
       courses: admissionData.admission_courses?.map(c => c.courses?.name).join(', ') || 'N/A',
       taxable_amount: taxableAmount.toFixed(2),
       gst_summary: gstBreakdown,
       total_payable_admission: admissionData.total_payable_amount,
       
-      // Predicted Next Payment Info
+      // Prediction object retained for future-proofing
       prediction: {
         next_due_date: nextInst ? nextInst.due_date : null,
         next_due_amount: nextInst ? nextInst.amount : 0,

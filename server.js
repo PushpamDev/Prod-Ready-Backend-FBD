@@ -28,16 +28,16 @@ const substitutionRoutes = require("./routes/substitution");
 const intakeRoutes = require('./routes/intake');
 const admissionUndertakingRoutes = require('./routes/admissionUndertaking');
 const batchAllotmentRoutes = require('./routes/batchAllotmentRoutes');
+const ceoRoutes = require("./routes/ceo");
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 const auth = require("./middleware/auth");
-const ceoRoutes = require("./routes/ceo");
+
 app.use(cors());
 app.use(express.json());
 
 // --- 1. API ROUTES ---
-// (All routes are now protected by `auth` except for `userRoutes`)
-
 app.use("/api/faculty", auth, facultyRoutes);
 app.use("/api/availability", auth, availabilityRoutes);
 app.use("/api/batches", auth, batchesRoutes);
@@ -62,18 +62,25 @@ app.use("/api/substitutions", auth, substitutionRoutes);
 app.use('/api/intakes', intakeRoutes);
 app.use('/', admissionUndertakingRoutes);
 app.use('/api/batch-allotment', auth, batchAllotmentRoutes);
-app.use("/api/ceo", require("./routes/ceo"));
+app.use("/api/ceo", auth, ceoRoutes); // Protected for Pushpam
 
 // --- 2. SERVE STATIC FRONTEND FILES (for Production) ---
-const frontendBuildPath = path.join(__dirname, '../Prod-Ready-Frontend-FBD-main/dist/spa');
+// Updated to match your actual local directory: /Users/rvmmedia/Desktop/Faridabad/Prod-Ready-Frontend-FBD-main/dist/spa
+const frontendBuildPath = path.resolve(__dirname, '../../Prod-Ready-Frontend-FBD-main/dist/spa');
+
 app.use(express.static(frontendBuildPath));
 
-
-// --- 3. SPA CATCH-ALL ROUTE (for Production) ---
+// --- 3. SPA CATCH-ALL ROUTE ---
+// Resolves ENOENT error by ensuring the catch-all looks in the correct 'dist/spa' folder
 app.get('*', (req, res) => {
-  res.sendFile(path.join(frontendBuildPath, 'index.html'));
+  const indexFile = path.join(frontendBuildPath, 'index.html');
+  res.sendFile(indexFile, (err) => {
+    if (err) {
+      console.error("Critical: Frontend build not found at path:", indexFile);
+      res.status(404).send("Frontend build not found. Ensure you have run 'npm run build' in the frontend folder.");
+    }
+  });
 });
-
 
 // --- Server Startup ---
 app.listen(PORT, () => {
