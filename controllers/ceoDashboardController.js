@@ -4,9 +4,22 @@ const supabase = require("../db");
 /**
  * @description 
  * Executive Dashboard Controller for Pushpam.
- * FIX: Applied date filters to Enrollment and Joining counts to ensure 
- * they respond to the UI DatePicker range.
+ * Uses getDynamicStatus helper to calculate Active Batches in real-time.
  */
+
+// ✅ INTEGRATED: Your dynamic status helper
+const getDynamicStatus = (startDate, endDate) => {
+  const now = new Date();
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  now.setHours(0, 0, 0, 0);
+  start.setHours(0, 0, 0, 0);
+  end.setHours(0, 0, 0, 0);
+  if (now < start) return 'upcoming';
+  if (now >= start && now <= end) return 'active';
+  return 'completed';
+};
+
 exports.getCEODashboard = async (req, res) => {
   if (req.user?.username !== "pushpam") {
     return res.status(403).json({ error: "Access denied" });
@@ -28,10 +41,9 @@ exports.getCEODashboard = async (req, res) => {
 
     const applyLoc = (query) => (targetLocationId ? query.eq('location_id', targetLocationId) : query);
 
-    // 3. Parallel Data Fetching with Period Filtering
     const [
       admissionsRes, 
-      batchesRes,
+      batchesRes, // ✅ FETCHING raw data for status calculation
       paymentsRes,
       ticketsRes,
       followUpsRes,
@@ -39,12 +51,12 @@ exports.getCEODashboard = async (req, res) => {
       projectedRes,
       lifetimeDebtRes 
     ] = await Promise.all([
-      // ✅ FIX: Applied date filter to Enrollment/Joining counts
       applyLoc(supabase.from("admissions").select("approval_status, joined"))
         .gte("created_at", from)
         .lte("created_at", to),
       
-      applyLoc(supabase.from("batches").select("id").eq("status", "active")),
+      // ✅ MODIFIED: Fetch start/end dates to apply dynamic logic
+      applyLoc(supabase.from("batches").select("start_date, end_date")),
       
       applyLoc(supabase.from("v_payments_with_location").select("amount_paid, method"))
         .gte("payment_date", from)
@@ -67,9 +79,13 @@ exports.getCEODashboard = async (req, res) => {
         .neq("status", "Paid")
     ]);
 
-    // --- AGGREGATION LOGIC ---
+    // --- AGGREGATION ENGINE ---
 
-    // Counts now reflect the chosen Date Range
+    // ✅ DYNAMIC BATCH CALCULATION
+    const activeBatchesCount = (batchesRes.data || []).filter(
+      batch => getDynamicStatus(batch.start_date, batch.end_date) === 'active'
+    ).length;
+
     const totalEnrolled = admissionsRes.data?.length || 0;
     const totalJoined = (admissionsRes.data || []).filter(a => a.joined === true).length;
 
@@ -89,7 +105,7 @@ exports.getCEODashboard = async (req, res) => {
       overview: {
         totalStudents: totalEnrolled,      
         studentsJoined: totalJoined,        
-        activeBatches: batchesRes.data?.length || 0,
+        activeBatches: activeBatchesCount, // ✅ Real-time calculated status
         totalFaculty: facultyRes.data?.length || 0,
         activeFaculty: facultyRes.data?.filter(f => f.is_active).length || 0
       },
@@ -126,7 +142,7 @@ exports.getCEODashboard = async (req, res) => {
     res.json(dashboardStats);
 
   } catch (err) {
-    console.error("CEO Dashboard Sync Error:", err);
-    res.status(500).json({ error: "Failed to sync executive intelligence report." });
+    console.error("CEO Dashboard Critical Sync Error:", err);
+    res.status(500).json({ error: "Failed to generate unified intelligence report." });
   }
 };
