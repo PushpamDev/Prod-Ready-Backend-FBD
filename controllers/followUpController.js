@@ -81,7 +81,7 @@ exports.getFollowUpTasks = async (req, res) => {
 
 /**
  * @description Create a follow-up log.
- * [FIXED] Handles UUID types and prevents 'Admission not found' errors.
+ * [FIXED] Robust branch validation with student-table fallback for 'null' locations.
  */
 exports.createFollowUpLog = async (req, res) => {
   const { admission_id, notes, next_follow_up_date, type, lead_type } = req.body;
@@ -94,29 +94,36 @@ exports.createFollowUpLog = async (req, res) => {
   }
 
   try {
-    // 1. Fetch the admission to check branch security
+    // 1. Fetch the admission AND the linked student's location as a fallback
     const { data: admission, error: fetchErr } = await supabase
       .from('admissions')
-      .select('location_id')
-      .eq('id', admission_id) // Ensure frontend sends a valid UUID
+      .select(`
+        location_id,
+        students (location_id)
+      `)
+      .eq('id', admission_id)
       .maybeSingle();
 
     if (fetchErr) throw fetchErr;
     if (!admission) {
-      return res.status(404).json({ error: `Admission record [${admission_id}] not found in database.` });
+      return res.status(404).json({ error: `Admission record [${admission_id}] not found.` });
     }
 
-    // 2. Security Gate
+    // 2. Resolve the actual location (Use admission col, fallback to student table)
+    const studentLocation = admission.location_id || (admission.students && admission.students.location_id);
+
+    // 3. Security Gate
     const isPushpam = username === 'pushpam';
-    const isSameBranch = admission.location_id && locationId && (Number(admission.location_id) === Number(locationId));
+    // Ensure we compare numbers to numbers
+    const isSameBranch = studentLocation && locationId && (Number(studentLocation) === Number(locationId));
 
     if (!isPushpam && !isSameBranch) {
       return res.status(403).json({ 
-        error: `Access Denied. Branch mismatch (Student: ${admission.location_id}, User: ${locationId})` 
+        error: `Access Denied. Branch mismatch (Student Branch: ${studentLocation || 'Unknown'}, Your Branch: ${locationId})` 
       });
     }
 
-    // 3. Insert Follow-up
+    // 4. Insert Follow-up
     const { data: followUp, error: insertError } = await supabase
       .from('follow_ups')
       .insert({
@@ -133,7 +140,7 @@ exports.createFollowUpLog = async (req, res) => {
 
     if (insertError) throw insertError;
 
-    // 4. Return with staff name
+    // 5. Return with staff name
     const { data: userData } = await supabase.from('users').select('username').eq('id', user_id).single();
 
     res.status(201).json({ 
@@ -145,7 +152,6 @@ exports.createFollowUpLog = async (req, res) => {
     res.status(500).json({ error: error.message || 'Internal server error.' });
   }
 };
-
 /**
  * @description Fetch history for a specific admission.
  */
