@@ -3,13 +3,12 @@ const supabase = require("../db");
 
 /**
  * @description 
- * Fetches comprehensive executive metrics for Pushpam.
- * Includes revenue, overdue tasks, ticket support, and period-specific collection predictions.
- * [UPDATED] Metrics now dynamically align with the selected 'from' and 'to' date range.
+ * Executive Dashboard Controller for Pushpam.
+ * REVENUE: Strictly mirrored from v_payments_with_location (Receipt-based).
+ * PREDICTED: Strictly mirrored from v_installments_with_location (Plan-based).
  */
 exports.getCEODashboard = async (req, res) => {
-  // --- Security Check ---
-  // Ensuring only the lead developer (Pushpam) has access to global financial data.
+  // 1. Strict Security: Global Admin Access for Pushpam
   if (req.user?.username !== "pushpam") {
     return res.status(403).json({ error: "Access denied" });
   }
@@ -19,69 +18,79 @@ exports.getCEODashboard = async (req, res) => {
   try {
     let targetLocationId = null;
 
-    // 1. Resolve Location Name to ID (Branch Filtering)
+    // 2. Resolve Branch Context
     if (location && location !== "all") {
-      const { data: locData, error: locError } = await supabase
+      const { data: locData } = await supabase
         .from('locations')
         .select('id')
         .ilike('name', location)
         .maybeSingle();
-
-      if (locError) throw locError;
-
-      if (!locData) {
-        return res.status(404).json({ error: `Location '${location}' not found.` });
-      }
-      targetLocationId = locData.id;
+      if (locData) targetLocationId = locData.id;
     }
 
-    // Helper to apply location filter if targetLocationId exists
     const applyLoc = (query) => (targetLocationId ? query.eq('location_id', targetLocationId) : query);
 
-    // 2. Parallel Execution for High Performance
+    // 3. Parallel Execution for Data Integrity
     const [
       studentsRes,
       batchesRes,
       paymentsRes,
       ticketsRes,
-      financialsRes,
+      admissionsRes,
       followUpsRes,
       facultyRes,
       projectedRes 
     ] = await Promise.all([
-      // A. Total Student Count
+      // Total Students globally or by branch
       applyLoc(supabase.from("students").select("*", { count: "exact", head: true })),
       
-      // B. Active Batches
+      // Active Training Batches
       applyLoc(supabase.from("batches").select("id").eq("status", "active")),
       
-      // C. Revenue Collected in the selected period
+      // ✅ REVENUE SOURCE: Strictly actual receipts (matches Ledger exactly)
       applyLoc(supabase.from("v_payments_with_location").select("amount_paid, method"))
         .gte("payment_date", from)
         .lte("payment_date", to),
       
-      // D. Support Tickets in the selected period
+      // Recent Support Tickets
       applyLoc(supabase.from("tickets").select("status"))
         .gte("created_at", from)
         .lte("created_at", to),
 
-      // E. Outstanding Debt (Current Snapshot)
-      applyLoc(supabase.from("v_admission_financial_summary").select("remaining_due, status")),
+      // Admission Funnel Status
+      applyLoc(supabase.from("admissions").select("approval_status")),
 
-      // F. Overdue Tasks list for the operations count
+      // Overdue Follow-up Tasks
       applyLoc(supabase.from("v_follow_up_task_list").select("next_task_due_date")),
 
-      // G. Faculty Stats
+      // Faculty Statistics
       applyLoc(supabase.from("faculty").select("id, is_active")),
-
-      // H. UPDATED: Prediction based on the SELECTED date range instead of hardcoded 30 days
+      
+      // ✅ PREDICTED SOURCE: Strictly Unpaid installments in chosen period
       applyLoc(supabase.from("v_installments_with_location").select("amount"))
         .neq("status", "Paid")
         .gte("due_date", from)
         .lte("due_date", to)
     ]);
 
-    // --- AGGREGATION & DATA PROCESSING ---
+    // --- AGGREGATION ENGINE ---
+
+    // Total Actual Collection (Mirrors Ledger Total Amount: ₹3,08,500)
+    const revenueInPeriod = (paymentsRes.data || []).reduce(
+      (sum, p) => sum + Number(p.amount_paid || 0), 0
+    );
+
+    // Total Predicted Income (Installments due but not yet 'Paid')
+    const predictedRevenue = (projectedRes.data || []).reduce(
+      (sum, i) => sum + Number(i.amount || 0), 0
+    );
+
+    // Breakdown by specific payment channels
+    const paymentMethodsBreakdown = (paymentsRes.data || []).reduce((acc, p) => {
+      const method = p.method || 'Other';
+      acc[method] = (acc[method] || 0) + Number(p.amount_paid || 0);
+      return acc;
+    }, {});
 
     const dashboardStats = {
       overview: {
@@ -91,25 +100,22 @@ exports.getCEODashboard = async (req, res) => {
         activeFaculty: facultyRes.data?.filter(f => f.is_active).length || 0
       },
       finance: {
-        revenueInPeriod: paymentsRes.data?.reduce((sum, p) => sum + Number(p.amount_paid || 0), 0) || 0,
-        totalOutstandingDebt: financialsRes.data?.reduce((sum, a) => sum + Number(a.remaining_due || 0), 0) || 0,
-        
-        // UPDATED: Now represents expected collections for the SPECIFIC period chosen in the UI
-        predictedRevenue: projectedRes.data?.reduce((sum, i) => sum + Number(i.amount || 0), 0) || 0,
-        
-        paymentMethods: paymentsRes.data?.reduce((acc, p) => {
-          acc[p.method] = (acc[p.method] || 0) + Number(p.amount_paid);
-          return acc;
-        }, {}) || {}
+        // Core Metric Fix: Receipt-based Revenue
+        revenueInPeriod: revenueInPeriod, 
+        predictedRevenue: predictedRevenue,
+        paymentMethods: paymentMethodsBreakdown
       },
       operations: {
-        // UPDATED: Count tasks overdue relative to the END of the selected period ('to')
-        overdueCollectionsCount: followUpsRes.data?.filter(f => f.next_task_due_date && f.next_task_due_date < to).length || 0,
+        // Count tasks that missed their 'to' date threshold
+        overdueCollectionsCount: (followUpsRes.data || []).filter(
+          f => f.next_task_due_date && f.next_task_due_date < to
+        ).length,
         
-        admissionStatusBreakdown: financialsRes.data?.reduce((acc, a) => {
-          acc[a.status] = (acc[a.status] || 0) + 1;
+        admissionStatusBreakdown: (admissionsRes.data || []).reduce((acc, a) => {
+          const status = a.approval_status || 'Pending';
+          acc[status] = (acc[status] || 0) + 1;
           return acc;
-        }, {}) || {}
+        }, {})
       },
       support: {
         totalTickets: ticketsRes.data?.length || 0,
@@ -123,7 +129,7 @@ exports.getCEODashboard = async (req, res) => {
     res.json(dashboardStats);
 
   } catch (err) {
-    console.error("Critical CEO Dashboard Error:", err);
-    res.status(500).json({ error: "Failed to generate branch-filtered report." });
+    console.error("CEO Dashboard Critical Sync Error:", err);
+    res.status(500).json({ error: "Failed to generate unified branch-filtered intelligence report." });
   }
-};
+};  

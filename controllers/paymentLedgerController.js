@@ -7,7 +7,7 @@ const supabase = require('../db.js');
  */
 exports.getPaymentLedger = async (req, res) => {
   // Increased default limit to 100 to handle higher volume audit periods
-  const { from, to, location, method, searchTerm, page = 1, limit = 100 } = req.query;
+  const { from, to, location, method, searchTerm, page = 1, limit = 1000 } = req.query;
   const locationId = req.locationId;
   const isPushpam = req.user?.username === 'pushpam';
 
