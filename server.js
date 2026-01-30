@@ -29,7 +29,7 @@ const intakeRoutes = require('./routes/intake');
 const admissionUndertakingRoutes = require('./routes/admissionUndertaking');
 const batchAllotmentRoutes = require('./routes/batchAllotmentRoutes');
 const ceoRoutes = require("./routes/ceo");
-
+const paymentLedgerRoutes = require('./routes/paymentLedgerRoutes');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const auth = require("./middleware/auth");
@@ -63,7 +63,7 @@ app.use('/api/intakes', intakeRoutes);
 app.use('/', admissionUndertakingRoutes);
 app.use('/api/batch-allotment', auth, batchAllotmentRoutes);
 app.use("/api/ceo", auth, ceoRoutes); // Protected for Pushpam
-
+app.use("/api/payment-ledger", auth, paymentLedgerRoutes);
 // --- 2. SERVE STATIC FRONTEND FILES (for Production) ---
 // Updated to match your actual local directory: /Users/rvmmedia/Desktop/Faridabad/Prod-Ready-Frontend-FBD-main/dist/spa
 const frontendBuildPath = path.resolve(__dirname, '../../Prod-Ready-Frontend-FBD-main/dist/spa');
