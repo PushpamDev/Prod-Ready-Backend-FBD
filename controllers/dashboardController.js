@@ -2,9 +2,16 @@
 const supabase = require('../db');
 
 exports.getDashboardData = async (req, res) => {
-  // ✅ 1. Capture the branch ID from the auth middleware or headers
+  // ✅ 1. Capture the branch ID and filter parameters
   const userLocationId = req.locationId || req.user?.location_id; 
-  const { search = '', status, batch, undertaking } = req.query;
+  const { 
+    search = '', 
+    status, 
+    batch, 
+    undertaking, 
+    startDate, // ISO string YYYY-MM-DD
+    endDate    // ISO string YYYY-MM-DD
+  } = req.query;
 
   if (!userLocationId) {
     return res.status(403).json({ error: 'Access denied: No branch location assigned to user.' });
@@ -15,8 +22,16 @@ exports.getDashboardData = async (req, res) => {
     let query = supabase
       .from('v_admission_financial_summary')
       .select('*')
-      // ✅ 2. STRICT BRANCH FILTER: Only show data belonging to this staff's branch
       .eq('location_id', userLocationId); 
+
+    // ✅ APPLY DATE FILTERS
+    // Using date_of_admission or created_at depending on your view's column naming
+    if (startDate) {
+      query = query.gte('date_of_admission', startDate);
+    }
+    if (endDate) {
+      query = query.lte('date_of_admission', endDate);
+    }
 
     // ✅ APPLY OPTIONAL FILTERS
     if (status && status !== 'all') {
@@ -24,7 +39,6 @@ exports.getDashboardData = async (req, res) => {
     }
 
     if (batch && batch !== 'all') {
-      // Use ilike for batch to handle potential string matching issues in views
       query = query.ilike('batch_name', `%${batch}%`);
     }
 
@@ -36,17 +50,16 @@ exports.getDashboardData = async (req, res) => {
       query = query.or(`student_name.ilike.%${search}%,admission_number.ilike.%${search}%,student_phone_number.ilike.%${search}%`);
     }
 
-    const { data, error } = await query.order('created_at', { ascending: false });
+    const { data, error } = await query.order('date_of_admission', { ascending: false });
 
     if (error) throw error;
 
-    // ✅ 3. DATA DE-DUPLICATION LOGIC
-    // We create a Map using admission_id as the key. 
-    // If a duplicate ID is found, we keep the one with the higher paid amount (fixes the ₹0 bug).
+    // ✅ 2. DATA DE-DUPLICATION LOGIC
     const uniqueAdmissionsMap = new Map();
     
     data.forEach(record => {
       const existing = uniqueAdmissionsMap.get(record.admission_id);
+      // Keep the record with the most complete financial data if duplicates exist in the view
       if (!existing || (Number(record.total_paid) > Number(existing.total_paid))) {
         uniqueAdmissionsMap.set(record.admission_id, record);
       }
@@ -54,28 +67,28 @@ exports.getDashboardData = async (req, res) => {
 
     const admissions = Array.from(uniqueAdmissionsMap.values());
 
-    // ✅ 4. METRICS CALCULATION (Using Cleaned Data)
+    // ✅ 3. METRICS CALCULATION (Dynamic based on selected range)
     const now = new Date();
     const currentMonth = now.getMonth();
     const currentYear = now.getFullYear();
 
     const metrics = {
+      // Total records found within this specific date filter
       totalAdmissions: admissions.length,
 
+      // Records within the current calendar month (for quick comparison)
       admissionsThisMonth: admissions.filter(r => {
-        const d = new Date(r.created_at);
+        const d = new Date(r.date_of_admission);
         return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
       }).length,
 
+      // Total collected from the filtered student list
       totalCollected: admissions.reduce((sum, r) => sum + Number(r.total_paid || 0), 0),
 
-      revenueCollectedThisMonth: admissions
-        .filter(r => {
-          const d = new Date(r.created_at);
-          return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
-        })
-        .reduce((sum, r) => sum + Number(r.total_paid || 0), 0),
+      // Revenue collected specifically from students admitted in the selected range
+      revenueCollectedThisMonth: admissions.reduce((sum, r) => sum + Number(r.total_paid || 0), 0),
 
+      // Current outstanding for the filtered list
       totalOutstanding: admissions.reduce((sum, r) => sum + Number(r.remaining_due || 0), 0),
 
       overdueCount: admissions.filter(r => r.status === 'Overdue').length,
@@ -85,7 +98,7 @@ exports.getDashboardData = async (req, res) => {
 
     res.status(200).json({
       metrics,
-      admissions: admissions, // Sending back clean, unique records
+      admissions: admissions,
     });
 
   } catch (err) {
