@@ -3,7 +3,6 @@ const supabase = require('../db');
 
 exports.getDashboardData = async (req, res) => {
   // ✅ 1. Capture the branch ID from the auth middleware or headers
-  // Usually, your auth middleware should attach this to req.user or req.locationId
   const userLocationId = req.locationId || req.user?.location_id; 
   const { search = '', status, batch, undertaking } = req.query;
 
@@ -25,7 +24,8 @@ exports.getDashboardData = async (req, res) => {
     }
 
     if (batch && batch !== 'all') {
-      query = query.eq('batch_name', batch);
+      // Use ilike for batch to handle potential string matching issues in views
+      query = query.ilike('batch_name', `%${batch}%`);
     }
 
     if (undertaking && undertaking !== 'all') {
@@ -40,38 +40,52 @@ exports.getDashboardData = async (req, res) => {
 
     if (error) throw error;
 
+    // ✅ 3. DATA DE-DUPLICATION LOGIC
+    // We create a Map using admission_id as the key. 
+    // If a duplicate ID is found, we keep the one with the higher paid amount (fixes the ₹0 bug).
+    const uniqueAdmissionsMap = new Map();
+    
+    data.forEach(record => {
+      const existing = uniqueAdmissionsMap.get(record.admission_id);
+      if (!existing || (Number(record.total_paid) > Number(existing.total_paid))) {
+        uniqueAdmissionsMap.set(record.admission_id, record);
+      }
+    });
+
+    const admissions = Array.from(uniqueAdmissionsMap.values());
+
+    // ✅ 4. METRICS CALCULATION (Using Cleaned Data)
     const now = new Date();
     const currentMonth = now.getMonth();
     const currentYear = now.getFullYear();
 
-    // ✅ Metrics are now calculated ONLY from the filtered branch data
     const metrics = {
-      totalAdmissions: data.length,
+      totalAdmissions: admissions.length,
 
-      admissionsThisMonth: data.filter(r => {
+      admissionsThisMonth: admissions.filter(r => {
         const d = new Date(r.created_at);
         return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
       }).length,
 
-      totalCollected: data.reduce((sum, r) => sum + Number(r.total_paid || 0), 0),
+      totalCollected: admissions.reduce((sum, r) => sum + Number(r.total_paid || 0), 0),
 
-      revenueCollectedThisMonth: data
+      revenueCollectedThisMonth: admissions
         .filter(r => {
           const d = new Date(r.created_at);
           return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
         })
         .reduce((sum, r) => sum + Number(r.total_paid || 0), 0),
 
-      totalOutstanding: data.reduce((sum, r) => sum + Number(r.remaining_due || 0), 0),
+      totalOutstanding: admissions.reduce((sum, r) => sum + Number(r.remaining_due || 0), 0),
 
-      overdueCount: data.filter(r => r.status === 'Overdue').length,
+      overdueCount: admissions.filter(r => r.status === 'Overdue').length,
 
-      pendingUndertakings: data.filter(r => r.undertaking_status === 'Pending').length,
+      pendingUndertakings: admissions.filter(r => r.undertaking_status === 'Pending').length,
     };
 
     res.status(200).json({
       metrics,
-      admissions: data,
+      admissions: admissions, // Sending back clean, unique records
     });
 
   } catch (err) {

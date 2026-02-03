@@ -58,7 +58,7 @@ app.use("/api/dashboard", auth, dashboardRoutes);
 app.use("/api/accounts", auth, accountsRoutes);
 app.use("/api/certificates", certificateRoutes);
 app.use("/api/follow-ups", auth, followUpRoutes);
-app.use("/api/substitutions", auth, substitutionRoutes);
+app.use("/api/substitution", auth, substitutionRoutes);
 app.use('/api/intakes', intakeRoutes);
 app.use('/', admissionUndertakingRoutes);
 app.use('/api/batch-allotment', auth, batchAllotmentRoutes);
