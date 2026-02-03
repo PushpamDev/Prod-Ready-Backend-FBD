@@ -57,7 +57,7 @@ const createTicket = async (req, res) => {
   }
 };
 
-// --- GET ALL TICKETS (DASHBOARD LOGIC & STATUS COUNTS) ---
+// --- GET ALL TICKETS (FIXED DASHBOARD LOGIC) ---
 const getAllTickets = async (req, res) => {
   if (!req.locationId) {
     return res.status(401).json({ error: 'Authentication required with location.' });
@@ -67,21 +67,36 @@ const getAllTickets = async (req, res) => {
     const { status, search, category, page = 1, limit = 15 } = req.query;
     const offset = (page - 1) * limit;
     const userId = req.user.id;
+    const userRole = req.user.role; // Ensure your auth middleware provides the role
     const isPushpam = req.user.username === 'pushpam';
 
-    // 1. Fetch data for UI Filter Counts
-    // If not pushpam, they only see/count tickets assigned to them
-    let countQuery = supabase
+    // 1. Build Base Queries
+    let countQuery = supabase.from('tickets').select('status, assignee_id, student_id').eq('location_id', req.locationId);
+    let mainQuery = supabase
       .from('tickets')
-      .select('status, assignee_id')
+      .select(`
+        id, title, description, status, priority, category, created_at, updated_at,
+        student:students(id, name, student_ticket_count:tickets(count)),
+        assignee:users(id, username),
+        assignee_id,
+        student_id
+      `, { count: 'exact' })
       .eq('location_id', req.locationId);
 
-    if (!isPushpam) {
+    // --- NEW LOGIC: Role-Based Filtering ---
+    if (userRole === 'student') {
+      // Students only see their own tickets
+      countQuery = countQuery.eq('student_id', userId);
+      mainQuery = mainQuery.eq('student_id', userId);
+    } else if (userRole === 'admin' && !isPushpam) {
+      // Non-Pushpam admins only see tickets assigned to them
       countQuery = countQuery.eq('assignee_id', userId);
-    }
+      mainQuery = mainQuery.eq('assignee_id', userId);
+    } 
+    // If Pushpam, no extra filter is added (sees all for that location)
 
+    // 2. Fetch Counts for UI
     const { data: countData } = await countQuery;
-    
     const counts = {
       All: countData?.length || 0,
       Open: countData?.filter(t => t.status === 'Open').length || 0,
@@ -89,36 +104,17 @@ const getAllTickets = async (req, res) => {
       Resolved: countData?.filter(t => t.status === 'Resolved').length || 0,
     };
 
-    // 2. Build the main paginated query
-    let query = supabase
-      .from('tickets')
-      .select(`
-        id, title, description, status, priority, category, created_at, updated_at,
-        student:students(
-          id, 
-          name,
-          student_ticket_count:tickets(count)
-        ),
-        assignee:users(id, username),
-        assignee_id
-      `, { count: 'exact' })
-      .eq('location_id', req.locationId);
-
-    // --- DASHBOARD TRACKING LOGIC ---
-    if (!isPushpam) {
-      query = query.eq('assignee_id', userId);
-    }
-
-    if (status && status !== 'All') query = query.eq('status', status);
-    if (category && category !== 'All') query = query.eq('category', category);
-    
+    // 3. Apply Filters (Status, Search, Category)
+    if (status && status !== 'All') mainQuery = mainQuery.eq('status', status);
+    if (category && category !== 'All') mainQuery = mainQuery.eq('category', category);
     if (search) {
-      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%,students.name.ilike.%${search}%`);
+      mainQuery = mainQuery.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
     }
-    
-    query = query.order('created_at', { ascending: false }).range(offset, offset + limit - 1);
 
-    const { data: tickets, error, count } = await query;
+    // 4. Execute Main Query
+    const { data: tickets, error, count } = await mainQuery
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
 
     if (error) return handleSupabaseError(res, error, 'fetching tickets');
 
@@ -130,16 +126,16 @@ const getAllTickets = async (req, res) => {
     res.status(200).json({
       items: transformedTickets,
       total: count,
-      counts, // Returns counts for the dashboard filter labels
+      counts,
       page: parseInt(page, 10),
       limit: parseInt(limit, 10),
     });
 
   } catch (error) {
+     console.error("Internal server error while getting tickets:", error);
      res.status(500).json({ error: "Internal server error" });
   }
 };
-
 // --- GET TICKET BY ID ---
 const getTicketById = async (req, res) => {
   const { id } = req.params;
@@ -262,16 +258,17 @@ const getTicketCategories = async (req, res) => {
   }
 };
 
-// --- POST CHAT MESSAGE (RESOLVED GUARD) ---
+// --- POST CHAT MESSAGE (FIXED FOR STUDENT VS ADMIN) ---
 const postChatMessage = async (req, res) => {
     const { ticketId } = req.params;
     const { message } = req.body;
-    const sender_user_id = req.user.id; 
+    const senderId = req.user.id; 
+    const userRole = req.user.role; // Ensure your auth middleware passes the role
 
     if (!message) return res.status(400).json({ error: 'Message cannot be empty.' });
 
     try {
-        // Guard: Check if ticket is resolved before allowing reply
+        // 1. Guard: Check if ticket is resolved
         const { data: ticket, error: ticketErr } = await supabase
             .from('tickets')
             .select('status')
@@ -283,17 +280,40 @@ const postChatMessage = async (req, res) => {
             return res.status(403).json({ error: 'Cannot reply to a resolved ticket. Please reopen it first.' });
         }
 
-        const { data: newMessage, error } = await supabase.rpc('send_admin_reply_and_update_status', {
-            p_ticket_id: ticketId,
-            p_sender_user_id: sender_user_id,
-            p_message: message
-        });
+        // 2. Logic: Assign ID to the correct column based on role
+        const chatPayload = {
+            ticket_id: ticketId,
+            message: message
+        };
 
-        if (error) return handleSupabaseError(res, error, 'posting chat message');
+        if (userRole === 'admin') {
+            chatPayload.sender_user_id = senderId;
+        } else {
+            chatPayload.sender_student_id = senderId;
+        }
 
-        await logActivity("Replied", `Admin replied to ticket ID ${ticketId}`, sender_user_id);
+        // 3. Insert the message
+        const { data: newMessage, error: insertErr } = await supabase
+            .from('ticket_chats')
+            .insert([chatPayload])
+            .select(`
+                id, message, created_at, sender_user_id, sender_student_id,
+                user:users(id, username),
+                student:students(id, name)
+            `)
+            .single();
+
+        if (insertErr) throw insertErr;
+
+        await logActivity("Replied", `Message sent to ticket ID ${ticketId}`, senderId);
         res.status(201).json(newMessage);
+
     } catch (error) {
+        console.error("Error in postChatMessage:", error);
+        // Handle the foreign key error gracefully
+        if (error.code === '23503') {
+            return res.status(400).json({ error: "Invalid sender ID. User/Student record not found." });
+        }
         res.status(500).json({ error: "Internal server error" });
     }
 };
