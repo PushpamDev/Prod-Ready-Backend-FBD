@@ -1,10 +1,6 @@
 const supabase = require('../db');
 const { logActivity } = require('./logActivity');
 
-/**
- * **UPDATED**: Fetches all students with server-side filtering and pagination.
- * Includes defensive checks to prevent frontend crashes from null/undefined records.
- */
 const getAllStudents = async (req, res) => {
   if (!req.locationId) {
     return res.status(401).json({ error: 'Authentication required.' });
@@ -20,9 +16,8 @@ const getAllStudents = async (req, res) => {
       .select('*', { count: 'exact' })
       .eq('location_id', req.locationId);
 
-    /* ✅ FIXED SEARCH LOGIC */
     if (search) {
-      const safeSearch = search.replace(/%/g, ''); // safety
+      const safeSearch = search.replace(/%/g, ''); 
       query = query.or(
         `name.ilike.%${safeSearch}%,admission_number.ilike.%${safeSearch}%,phone_number.ilike.%${safeSearch}%`
       );
@@ -35,18 +30,34 @@ const getAllStudents = async (req, res) => {
     if (error) throw error;
 
     const processedStudents = (students || []).map(student => {
-      let dynamicRemark = student.remarks || '';
-      const balance = Number(student.total_due_amount || 0);
+      const balance = student.total_due_amount === null ? 0 : Number(student.total_due_amount);
       const nextDate = student.next_task_due_date;
+      
+      let dynamicRemark = '';
 
-      if (balance <= 0 && student.total_due_amount !== null) {
+      // 1. PRIORITY: If balance is 0 or less, it's ALWAYS FULL PAID
+      if (balance <= 0) {
         dynamicRemark = 'FULL PAID';
-      } else if (nextDate) {
+      } 
+      // 2. SECONDARY: If they owe money, show the next follow-up date
+      else if (nextDate) {
         const d = new Date(nextDate);
-        dynamicRemark = `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('en-GB', { month: 'short' })} ${d.getFullYear()}`;
+        if (!isNaN(d.getTime())) {
+          dynamicRemark = `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('en-GB', { month: 'short' })} ${d.getFullYear()}`;
+        } else {
+          dynamicRemark = student.remarks || 'Pending';
+        }
+      } 
+      // 3. FALLBACK: Show the manual remark if neither of the above apply
+      else {
+        dynamicRemark = student.remarks || '';
       }
 
-      return { ...student, remarks: dynamicRemark };
+      return { 
+        ...student, 
+        remarks: dynamicRemark,
+        total_due_amount: balance 
+      };
     });
 
     res.status(200).json({
@@ -163,12 +174,11 @@ const getStudentBatches = async (req, res) => {
   }
 };
 
-// controllers/studentsController.js
-
+/**
+ * Updates a student's defaulter status.
+ */
 const setDefaulterStatus = async (req, res) => {
   const { id } = req.params;
-  // If is_defaulter isn't in body (from mark-defaulter route), 
-  // we assume true if calling the mark route, or false if forced by middleware
   const is_defaulter = req.body.is_defaulter !== undefined ? req.body.is_defaulter : true;
   const { reason } = req.body;
 

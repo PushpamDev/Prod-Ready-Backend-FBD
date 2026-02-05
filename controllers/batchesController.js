@@ -344,11 +344,8 @@ const deleteBatch = async (req, res) => {
 };
 
 const getBatchStudents = async (req, res) => {
-  // NO CHANGE NEEDED. This is querying by a unique 'batch_id' (UUID).
-  // This is safe and correct.
   const { id } = req.params;
   try {
-    // ... (rest of function is fine) ...
     const allStudentLinks = [];
     const pageSize = 1000;
     let page = 0;
@@ -358,9 +355,21 @@ const getBatchStudents = async (req, res) => {
       const from = page * pageSize;
       const to = from + pageSize - 1;
 
+      // FIX: Join with the view instead of the raw 'students' table 
+      // to get total_due_amount and updated remarks
       const { data, error } = await supabase
         .from('batch_students')
-        .select('students ( id, name, admission_number, phone_number, remarks )')
+        .select(`
+          students:v_students_with_followup ( 
+            id, 
+            name, 
+            admission_number, 
+            phone_number, 
+            remarks, 
+            total_due_amount, 
+            is_defaulter 
+          )
+        `)
         .eq('batch_id', id)
         .range(from, to);
 
@@ -376,9 +385,30 @@ const getBatchStudents = async (req, res) => {
       page++;
     }
 
-    const students = allStudentLinks.map(item => item.students).filter(Boolean);
+    // Process the students to apply the strict "FULL PAID" toggle logic
+    const students = allStudentLinks
+      .map(item => {
+        const student = item.students;
+        if (!student) return null;
+
+        // Force balance to a number and treat null as 0
+        const balance = student.total_due_amount === null ? 0 : Number(student.total_due_amount);
+
+        // SYNC LOGIC: If balance is 0, force 'FULL PAID'. Otherwise, use database remark
+        if (balance <= 0) {
+          student.remarks = 'FULL PAID';
+        }
+        
+        return {
+          ...student,
+          total_due_amount: balance
+        };
+      })
+      .filter(Boolean);
+
     res.json(students);
   } catch (error) {
+    console.error("Error in getBatchStudents:", error);
     res.status(500).json({ error: error.message });
   }
 };

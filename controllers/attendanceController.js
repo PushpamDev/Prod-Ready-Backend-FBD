@@ -101,12 +101,20 @@ const getDailyAttendanceForBatch = async (req, res) => {
 };
 
 /**
- * UPDATED: Returns a report that includes "Missing" dates where faculty failed to mark.
+ * UPDATED: Returns a report including students with prioritized financial status.
+ * Logic: (total_due_amount <= 0) ? 'FULL PAID' : student.remarks
+ */
+/**
+ * UPDATED: Returns a report including students with a specific remark hierarchy.
+ * Priority: (Balance <= 0) ? 'FULL PAID' : (Next Date) ? formattedDate : student.remarks
  */
 const getBatchAttendanceReport = async (req, res) => {
   const { batchId } = req.params;
   const { startDate, endDate } = req.query;
-  if (!batchId || !startDate || !endDate) return res.status(400).json({ error: 'Batch ID, start date, and end date are required.' });
+  
+  if (!batchId || !startDate || !endDate) {
+    return res.status(400).json({ error: 'Batch ID, start date, and end date are required.' });
+  }
   
   try {
     const [
@@ -115,17 +123,59 @@ const getBatchAttendanceReport = async (req, res) => {
       { data: attendanceRecords, error: attendanceError }
     ] = await Promise.all([
       supabase.from('batches').select('start_date, end_date, schedule').eq('id', batchId).single(),
-      supabase.from('batch_students').select('students(*)').eq('batch_id', batchId),
-      supabase.from('student_attendance').select('student_id, date, is_present').eq('batch_id', batchId).gte('date', startDate).lte('date', endDate)
+      // Fetching from the view that includes financial and task date data
+      supabase.from('batch_students')
+        .select(`
+          student_id,
+          students:v_students_with_followup(*)
+        `)
+        .eq('batch_id', batchId),
+      supabase.from('student_attendance')
+        .select('student_id, date, is_present')
+        .eq('batch_id', batchId)
+        .gte('date', startDate)
+        .lte('date', endDate)
     ]);
 
     if (batchError || studentError || attendanceError) throw (batchError || studentError || attendanceError);
     if (!studentLinks || studentLinks.length === 0) return res.status(404).json({ error: 'No students found for this batch.' });
 
-    const students = studentLinks.map(link => link.students);
+    // Process students to apply the updated hierarchy logic
+    const processedStudents = studentLinks.map(link => {
+      const student = link.students;
+      // Convert balance to a clean number; null is treated as 0
+      const balance = student.total_due_amount === null ? 0 : Number(student.total_due_amount);
+      const nextDate = student.next_task_due_date; // Available from the view
+      
+      let dynamicRemark = '';
+
+      // 1. HIGHEST PRIORITY: If balance is 0 or less, show 'FULL PAID'
+      if (balance <= 0) {
+        dynamicRemark = 'FULL PAID';
+      } 
+      // 2. SECONDARY PRIORITY: If fee is pending, show the Next Follow Up Date
+      else if (nextDate) {
+        const d = new Date(nextDate);
+        if (!isNaN(d.getTime())) {
+          // Format as "DD Mon YYYY" (e.g., 20 Jan 2026) to match UI screenshots
+          dynamicRemark = `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('en-GB', { month: 'short' })} ${d.getFullYear()}`;
+        } else {
+          dynamicRemark = student.remarks || 'Pending';
+        }
+      } 
+      // 3. FALLBACK: Use the original manual remark from the database
+      else {
+        dynamicRemark = student.remarks || '';
+      }
+
+      return {
+        ...student,
+        remarks: dynamicRemark,
+        total_due_amount: balance
+      };
+    });
+
     const markedDates = [...new Set(attendanceRecords.map(r => r.date))];
-    
-    // COMPLIANCE LOGIC: Find what dates are missing between range
     const expectedDates = getExpectedSessionDates(startDate, endDate, batchInfo.schedule || [1,2,3,4,5,6]);
     const missingDates = expectedDates.filter(d => !markedDates.includes(d));
 
@@ -137,7 +187,7 @@ const getBatchAttendanceReport = async (req, res) => {
     }, {});
 
     res.status(200).json({ 
-      students, 
+      students: processedStudents, 
       attendance_by_date, 
       compliance: {
         missing_attendance_dates: missingDates,
@@ -146,10 +196,10 @@ const getBatchAttendanceReport = async (req, res) => {
       }
     });
   } catch (error) {
+    console.error("Batch Report Error:", error);
     res.status(500).json({ error: error.message });
   }
 };
-
 /**
  * UPDATED: Single Faculty Audit Report
  * Includes Date Filters and Math Guards to prevent 100%+ attendance discrepancies.
