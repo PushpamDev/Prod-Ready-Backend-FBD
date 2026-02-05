@@ -136,7 +136,7 @@ exports.getAdmissionById = async (req, res) => {
 /**
  * @description
  * Create a new admission using RPC.
- * This version ensures installments are passed as a JSONB array to populate the installments table.
+ * Updated to record the staff member (user) who processed the admission.
  */
 exports.createAdmission = async (req, res) => {
   const {
@@ -160,11 +160,12 @@ exports.createAdmission = async (req, res) => {
   } = req.body;
 
   const locationId = req.locationId;
+  const userId = req.user?.id; // Capture the ID of the logged-in staff member
 
   /* ---------------------------- VALIDATION ---------------------------- */
-  if (!locationId) {
-    return res.status(400).json({
-      error: 'User does not have an assigned Branch Location. Please contact Admin.',
+  if (!locationId || !userId) {
+    return res.status(401).json({
+      error: 'Authentication failed: User identity or Branch Location missing.',
     });
   }
 
@@ -182,7 +183,7 @@ exports.createAdmission = async (req, res) => {
     });
   }
 
-  // Installment Validation (Crucial for the new table logic)
+  // Installment Validation
   if (!Array.isArray(installments) || installments.length === 0) {
     return res.status(400).json({
       error: 'Installment schedule is required for financial tracking.',
@@ -206,13 +207,12 @@ exports.createAdmission = async (req, res) => {
         p_course_start_date: course_start_date || null,
         p_batch_preference: batch_preference || null,
         p_remarks: remarks || null,
-        // Ensure UUID is valid or null
         p_certificate_id: (certificate_id && certificate_id !== 'null') ? certificate_id : null,
         p_discount: Number(discount) || 0,
         p_course_ids: course_ids,
-        // This is passed as JSONB - SQL function will iterate through this
         p_installments: installments, 
         p_location_id: locationId,
+        p_admitted_by: userId, // <--- New parameter passed to the updated RPC
         p_source_intake_id: source_intake_id || null, 
       }
     );
@@ -226,10 +226,9 @@ exports.createAdmission = async (req, res) => {
   } catch (error) {
     console.error('Error creating admission:', error);
 
-    // Handle the specific "signature mismatch" if you haven't run the DROP/CREATE SQL yet
     if (error.code === '42883') {
       return res.status(500).json({
-        error: 'Database function signature mismatch. Please ensure you ran the DROP and CREATE FUNCTION SQL commands.',
+        error: 'Database function signature mismatch. Ensure you updated the RPC function to include p_admitted_by.',
       });
     }
 
@@ -238,16 +237,16 @@ exports.createAdmission = async (req, res) => {
     });
   }
 };
-
 /**
  * @description
  * Update an existing admission.
  * STRICT SECURITY: Only user 'pushpam' can proceed.
+ * Updated to record the user who performed the update.
  */
 exports.updateAdmission = async (req, res) => {
   const { id } = req.params;
 
-  // Security Gate
+  // Security Gate: Verified against user profile
   if (req.user?.username !== 'pushpam') {
     return res.status(403).json({
       error: "Access denied. Only 'pushpam' can edit admissions.",
@@ -270,10 +269,11 @@ exports.updateAdmission = async (req, res) => {
     certificate_id,
     discount,
     course_ids,
-    installments, // Ensure this is coming from the frontend edit modal
+    installments, 
   } = req.body;
 
   const locationIdStr = req.locationId ? String(req.locationId) : null;
+  const userId = req.user?.id; // Capture the editor's ID for the audit trail
 
   try {
     // Basic validation for installments
@@ -281,6 +281,7 @@ exports.updateAdmission = async (req, res) => {
       return res.status(400).json({ error: "Installments must be an array." });
     }
 
+    // RPC call updated with editor tracking
     const { error } = await supabase.rpc('update_admission_full', {
       p_admission_id: id,
       p_student_name: student_name,
@@ -295,14 +296,14 @@ exports.updateAdmission = async (req, res) => {
       p_course_start_date: course_start_date || null,
       p_batch_preference: batch_preference || null,
       p_remarks: remarks || null,
-      // Handle Supabase/UUID length or null string from frontend
       p_certificate_id: (certificate_id && certificate_id !== 'null' && certificate_id.length > 20) 
         ? certificate_id 
         : null,
       p_discount: Number(discount) || 0,
       p_course_ids: Array.isArray(course_ids) ? course_ids : [],
-      p_installments: installments || [], // Passing the JSONB array
+      p_installments: installments || [], 
       p_location_id: locationIdStr,
+      p_updated_by: userId, // <--- Add this to your update_admission_full SQL function
     });
 
     if (error) throw error;
@@ -315,6 +316,7 @@ exports.updateAdmission = async (req, res) => {
     });
   }
 };
+
 
 exports.checkAdmissionByPhone = async (req, res) => {
   try {
