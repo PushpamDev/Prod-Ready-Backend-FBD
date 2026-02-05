@@ -175,3 +175,89 @@ exports.getCEODashboard = async (req, res) => {
     res.status(500).json({ error: "Failed to generate unified intelligence report." });
   }
 };
+
+// server/controllers/ceoDashboardController.js
+
+/**
+ * @description Trend Chart API for Executive Intelligence
+ * Returns daily aggregated metrics for charts.
+ */
+exports.getCEOTrends = async (req, res) => {
+  if (req.user?.username !== "pushpam") {
+    return res.status(403).json({ error: "Access denied" });
+  }
+
+  const { from, to, location, interval = 'day' } = req.query;
+
+  try {
+    let targetLocationId = null;
+    if (location && location !== "all") {
+      const { data: locData } = await supabase.from('locations').select('id').ilike('name', location).maybeSingle();
+      if (locData) targetLocationId = locData.id;
+    }
+
+    const applyLoc = (query) => (targetLocationId ? query.eq('location_id', targetLocationId) : query);
+
+    // Fetch raw time-stamped data
+    const [admissions, payments, tickets] = await Promise.all([
+      applyLoc(supabase.from("admissions").select("created_at, joined"))
+        .gte("created_at", from).lte("created_at", to),
+      
+      applyLoc(supabase.from("v_payments_with_location").select("payment_date, amount_paid"))
+        .gte("payment_date", from).lte("payment_date", to),
+      
+      applyLoc(supabase.from("tickets").select("created_at, status"))
+        .gte("created_at", from).lte("created_at", to)
+    ]);
+
+    // Helper: Create a Map of all dates in range to ensure no gaps in the chart
+    const trendMap = {};
+    let curr = new Date(from);
+    const end = new Date(to);
+    while (curr <= end) {
+      const dateKey = curr.toISOString().split('T')[0];
+      trendMap[dateKey] = {
+        date: dateKey,
+        admissions: 0,
+        joined: 0,
+        revenue: 0,
+        ticketsOpened: 0,
+        ticketsResolved: 0
+      };
+      curr.setDate(curr.getDate() + 1);
+    }
+
+    // 1. Map Admissions
+    admissions.data?.forEach(a => {
+      const date = a.created_at.split('T')[0];
+      if (trendMap[date]) {
+        trendMap[date].admissions += 1;
+        if (a.joined) trendMap[date].joined += 1;
+      }
+    });
+
+    // 2. Map Revenue
+    payments.data?.forEach(p => {
+      const date = p.payment_date; // Assuming YYYY-MM-DD
+      if (trendMap[date]) {
+        trendMap[date].revenue += Number(p.amount_paid || 0);
+      }
+    });
+
+    // 3. Map Tickets
+    tickets.data?.forEach(t => {
+      const date = t.created_at.split('T')[0];
+      if (trendMap[date]) {
+        trendMap[date].ticketsOpened += 1;
+        if (t.status === "Resolved") trendMap[date].ticketsResolved += 1;
+      }
+    });
+
+    // Convert Map to sorted array for the frontend chart
+    const trendData = Object.values(trendMap).sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    res.json(trendData);
+  } catch (err) {
+    res.status(500).json({ error: "Trend analysis failed." });
+  }
+};
