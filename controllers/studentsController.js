@@ -6,63 +6,80 @@ const getAllStudents = async (req, res) => {
     return res.status(401).json({ error: 'Authentication required.' });
   }
 
-  const { search, page = 1, limit = 200 } = req.query;
-  const from = (page - 1) * limit;
-  const to = from + limit - 1;
+  const { search } = req.query;
 
   try {
     let query = supabase
-      .from('v_students_with_followup')
-      .select('*', { count: 'exact' })
+      .from('students')
+      .select(`
+        *,
+        follow_up:v_follow_up_task_list (
+          next_task_due_date,
+          total_due,
+          task_count
+        )
+      `)
       .eq('location_id', req.locationId);
 
     if (search) {
       const safeSearch = search.replace(/%/g, ''); 
-      query = query.or(
-        `name.ilike.%${safeSearch}%,admission_number.ilike.%${safeSearch}%,phone_number.ilike.%${safeSearch}%`
-      );
+      query = query.or(`name.ilike.%${safeSearch}%,admission_number.ilike.%${safeSearch}%,phone_number.ilike.%${safeSearch}%`);
     }
 
-    const { data: students, error, count } = await query
-      .order('name', { ascending: true })
-      .range(from, to);
-
+    const { data: students, error } = await query.order('name', { ascending: true });
     if (error) throw error;
 
     const processedStudents = (students || []).map(student => {
-      const balance = student.total_due_amount === null ? 0 : Number(student.total_due_amount);
-      const nextDate = student.next_task_due_date;
+      /**
+       * ✅ FIX 1: Support both Array and Object responses. 
+       * Supabase joins usually return an array: [ { ... } ]
+       */
+      const followData = Array.isArray(student.follow_up) 
+        ? student.follow_up[0] 
+        : student.follow_up;
+      
+      /**
+       * ✅ FIX 2: Default balance to 0 if no follow-up exists, 
+       * or use the correct 'total_due' key.
+       */
+      const balance = followData ? Number(followData.total_due || 0) : 0;
+      const nextDate = followData?.next_task_due_date;
+      const hasTasks = Number(followData?.task_count || 0) > 0;
       
       let dynamicRemark = '';
 
-      // 1. PRIORITY: If balance is 0 or less, it's ALWAYS FULL PAID
-      if (balance <= 0) {
-        dynamicRemark = 'FULL PAID';
-      } 
-      // 2. SECONDARY: If they owe money, show the next follow-up date
-      else if (nextDate) {
-        const d = new Date(nextDate);
-        if (!isNaN(d.getTime())) {
-          dynamicRemark = `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('en-GB', { month: 'short' })} ${d.getFullYear()}`;
-        } else {
-          dynamicRemark = student.remarks || 'Pending';
+      if (followData && hasTasks) {
+        // Priority 1: Full Paid (Balance is 0 and they have a follow-up history)
+        if (balance <= 0) {
+          dynamicRemark = 'FULL PAID';
+        } 
+        // Priority 2: Next Follow-up Date (They owe money and have a date)
+        else if (nextDate) {
+          const d = new Date(nextDate);
+          dynamicRemark = !isNaN(d.getTime()) 
+            ? `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('en-GB', { month: 'short' })} ${d.getFullYear()}`
+            : 'Date Pending';
+        } 
+        // Priority 3: Fallback within follow-up
+        else {
+          dynamicRemark = student.remarks || 'Follow-up Active';
         }
-      } 
-      // 3. FALLBACK: Show the manual remark if neither of the above apply
-      else {
-        dynamicRemark = student.remarks || '';
+      } else {
+        // ✅ FIX 3: No follow-up record at all - use Student Table Remarks
+        dynamicRemark = student.remarks || 'No Remark';
       }
 
       return { 
         ...student, 
         remarks: dynamicRemark,
-        total_due_amount: balance 
+        total_due_amount: balance, // Now returns 16500 instead of 1
+        follow_up: followData      // Flattens it for easier frontend use
       };
     });
 
-    res.status(200).json({
-      students: processedStudents,
-      count: count || 0,
+    res.status(200).json({ 
+      students: processedStudents, 
+      count: processedStudents.length 
     });
 
   } catch (error) {
@@ -70,7 +87,6 @@ const getAllStudents = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
-
 /**
  * Creates a new student record.
  */

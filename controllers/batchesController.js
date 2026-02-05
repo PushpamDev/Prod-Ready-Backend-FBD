@@ -343,6 +343,65 @@ const deleteBatch = async (req, res) => {
   }
 };
 
+
+/**
+ * ✅ Standardized transformation logic (Hybrid Support)
+ * * Logic A (Modern): If Admission Number starts with 'RVM-'
+ * 1. Priority: If total_due <= 0 -> 'FULL PAID'
+ * 2. Priority: If balance > 0 and next_task_due_date exists -> formatted Date
+ * 3. Fallback: Manual remark from student table
+ * * Logic B (Legacy): If Admission Number is purely numeric
+ * - Directly show the exact manual 'remarks' written by admin
+ */
+const transformStudentData = (student) => {
+  if (!student) return null;
+
+  const admissionNo = (student.admission_number || "").trim();
+  const followData = Array.isArray(student.follow_up) 
+    ? student.follow_up[0] 
+    : student.follow_up;
+  
+  const balance = followData ? Number(followData.total_due || 0) : 0;
+  const nextDate = followData?.next_task_due_date;
+  
+  let dynamicRemark = '';
+
+  // ✅ LOGIC A: Modern Students (e.g., RVM-2026-0093)
+  if (admissionNo.startsWith('RVM-')) {
+    // Priority 1: Check Financial Balance first
+    if (balance <= 0) {
+      dynamicRemark = 'FULL PAID';
+    } 
+    // Priority 2: If money is owed, check for the next automated due date
+    else if (nextDate) {
+      const d = new Date(nextDate);
+      if (!isNaN(d.getTime())) {
+        // Formats to "05 Feb 2026"
+        dynamicRemark = `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('en-GB', { month: 'short' })} ${d.getFullYear()}`;
+      } else {
+        dynamicRemark = 'Date Pending';
+      }
+    }
+    // Priority 3: Fallback for RVM students if no follow-up record exists
+    else {
+      dynamicRemark = student.remarks || 'No Remark';
+    }
+  } 
+  // ✅ LOGIC B: Legacy Students (e.g., 4270, 2194)
+  else {
+    // Show the exact remark that was manually entered by the admin
+    dynamicRemark = student.remarks || 'No Remark';
+  }
+
+  return { 
+    ...student, 
+    name: student.name?.trim(), // Clean up whitespace/tabs
+    remarks: dynamicRemark,
+    total_due_amount: balance,
+    follow_up: followData 
+  };
+};
+
 const getBatchStudents = async (req, res) => {
   const { id } = req.params;
   try {
@@ -355,29 +414,28 @@ const getBatchStudents = async (req, res) => {
       const from = page * pageSize;
       const to = from + pageSize - 1;
 
-      // FIX: Join with the view instead of the raw 'students' table 
-      // to get total_due_amount and updated remarks
+      /**
+       * ✅ Fetch from physical 'students' table to avoid PGRST200 join error.
+       * This uses the student_id foreign key bridge to the view.
+       */
       const { data, error } = await supabase
         .from('batch_students')
         .select(`
-          students:v_students_with_followup ( 
-            id, 
-            name, 
-            admission_number, 
-            phone_number, 
-            remarks, 
-            total_due_amount, 
-            is_defaulter 
+          student_id,
+          students:student_id (
+            *,
+            follow_up:v_follow_up_task_list (
+              next_task_due_date,
+              total_due,
+              task_count
+            )
           )
         `)
         .eq('batch_id', id)
         .range(from, to);
 
       if (error) throw error;
-
-      if (data) {
-        allStudentLinks.push(...data);
-      }
+      if (data) allStudentLinks.push(...data);
       
       if (!data || data.length < pageSize) {
         moreDataAvailable = false;
@@ -385,28 +443,12 @@ const getBatchStudents = async (req, res) => {
       page++;
     }
 
-    // Process the students to apply the strict "FULL PAID" toggle logic
-    const students = allStudentLinks
-      .map(item => {
-        const student = item.students;
-        if (!student) return null;
-
-        // Force balance to a number and treat null as 0
-        const balance = student.total_due_amount === null ? 0 : Number(student.total_due_amount);
-
-        // SYNC LOGIC: If balance is 0, force 'FULL PAID'. Otherwise, use database remark
-        if (balance <= 0) {
-          student.remarks = 'FULL PAID';
-        }
-        
-        return {
-          ...student,
-          total_due_amount: balance
-        };
-      })
+    // Process students using the hybrid transformer logic
+    const processedStudents = allStudentLinks
+      .map(item => transformStudentData(item.students))
       .filter(Boolean);
 
-    res.json(students);
+    res.json(processedStudents);
   } catch (error) {
     console.error("Error in getBatchStudents:", error);
     res.status(500).json({ error: error.message });
@@ -414,32 +456,39 @@ const getBatchStudents = async (req, res) => {
 };
 
 const getActiveStudentsCount = async (req, res) => {
-  // --- NEW --- This route MUST be protected by auth to get req.locationId
+  // Ensure location context exists
   if (!req.locationId) {
-    return res.status(401).json({ error: 'Authentication required with location.' });
+    return res.status(401).json({ error: 'Authentication required with location context.' });
   }
   
   try {
-    const { data: batches, error: batchesError } = await supabase
+    const now = new Date().toISOString();
+
+    /**
+     * ✅ OPTIMIZATION: 
+     * Instead of fetching all batches and filtering in JS, 
+     * we query Supabase for batches that are currently "Active" based on dates.
+     */
+    const { data: activeBatches, error: batchesError } = await supabase
       .from("batches")
-      .select("id, start_date, end_date")
-      // --- MODIFIED --- Filter batches by the user's location
-      .eq('location_id', req.locationId); 
+      .select("id")
+      .eq('location_id', req.locationId)
+      .lte('start_date', now)   // Started on or before today
+      .gte('end_date', now);    // Ends on or after today
 
     if (batchesError) throw batchesError;
 
-    // The rest of the logic is now correct, as it's operating
-    // only on batches from the correct location.
-    const activeBatches = batches.filter(
-      (batch) => getDynamicStatus(batch.start_date, batch.end_date).toLowerCase() === "active"
-    );
-
-    if (activeBatches.length === 0) {
+    // If no batches are currently active, return 0 immediately
+    if (!activeBatches || activeBatches.length === 0) {
       return res.status(200).json({ total_active_students: 0 });
     }
 
     const activeBatchIds = activeBatches.map((b) => b.id);
 
+    /**
+     * ✅ JOIN CHECK:
+     * Fetch unique student IDs linked to these specific active batches.
+     */
     const { data: studentLinks, error: studentLinksError } = await supabase
       .from("batch_students")
       .select("student_id")
@@ -447,12 +496,18 @@ const getActiveStudentsCount = async (req, res) => {
 
     if (studentLinksError) throw studentLinksError;
 
-    const uniqueStudentIds = new Set(studentLinks.map((link) => link.student_id));
+    // Use a Set to ensure we don't double-count students enrolled in multiple active batches
+    const uniqueStudentIds = new Set((studentLinks || []).map((link) => link.student_id));
     const totalActiveStudents = uniqueStudentIds.size;
 
-    res.status(200).json({ total_active_students: totalActiveStudents });
+    res.status(200).json({ 
+      total_active_students: totalActiveStudents,
+      active_batches_count: activeBatchIds.length 
+    });
+
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error in getActiveStudentsCount:', error);
+    res.status(500).json({ error: 'Failed to calculate active student metrics.' });
   }
 };
 

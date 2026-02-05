@@ -101,12 +101,10 @@ const getDailyAttendanceForBatch = async (req, res) => {
 };
 
 /**
- * UPDATED: Returns a report including students with prioritized financial status.
- * Logic: (total_due_amount <= 0) ? 'FULL PAID' : student.remarks
- */
-/**
  * UPDATED: Returns a report including students with a specific remark hierarchy.
- * Priority: (Balance <= 0) ? 'FULL PAID' : (Next Date) ? formattedDate : student.remarks
+ * Priority: 
+ * - If RVM: (Balance <= 0) ? 'FULL PAID' : (Next Date) ? formattedDate : student.remarks
+ * - If Legacy: student.remarks
  */
 const getBatchAttendanceReport = async (req, res) => {
   const { batchId } = req.params;
@@ -123,11 +121,18 @@ const getBatchAttendanceReport = async (req, res) => {
       { data: attendanceRecords, error: attendanceError }
     ] = await Promise.all([
       supabase.from('batches').select('start_date, end_date, schedule').eq('id', batchId).single(),
-      // Fetching from the view that includes financial and task date data
+      // ✅ Fetching via 'students' table bridge to avoid PGRST200 join errors
       supabase.from('batch_students')
         .select(`
           student_id,
-          students:v_students_with_followup(*)
+          students:student_id (
+            *,
+            follow_up:v_follow_up_task_list (
+              next_task_due_date,
+              total_due,
+              task_count
+            )
+          )
         `)
         .eq('batch_id', batchId),
       supabase.from('student_attendance')
@@ -140,43 +145,52 @@ const getBatchAttendanceReport = async (req, res) => {
     if (batchError || studentError || attendanceError) throw (batchError || studentError || attendanceError);
     if (!studentLinks || studentLinks.length === 0) return res.status(404).json({ error: 'No students found for this batch.' });
 
-    // Process students to apply the updated hierarchy logic
+    // Process students to apply the standardized hybrid logic
     const processedStudents = studentLinks.map(link => {
       const student = link.students;
-      // Convert balance to a clean number; null is treated as 0
-      const balance = student.total_due_amount === null ? 0 : Number(student.total_due_amount);
-      const nextDate = student.next_task_due_date; // Available from the view
+      if (!student) return null;
+
+      const admissionNo = (student.admission_number || "").trim();
+      const followData = Array.isArray(student.follow_up) ? student.follow_up[0] : student.follow_up;
+      const balance = followData ? Number(followData.total_due || 0) : 0;
+      const nextDate = followData?.next_task_due_date;
       
       let dynamicRemark = '';
 
-      // 1. HIGHEST PRIORITY: If balance is 0 or less, show 'FULL PAID'
-      if (balance <= 0) {
-        dynamicRemark = 'FULL PAID';
-      } 
-      // 2. SECONDARY PRIORITY: If fee is pending, show the Next Follow Up Date
-      else if (nextDate) {
-        const d = new Date(nextDate);
-        if (!isNaN(d.getTime())) {
-          // Format as "DD Mon YYYY" (e.g., 20 Jan 2026) to match UI screenshots
-          dynamicRemark = `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('en-GB', { month: 'short' })} ${d.getFullYear()}`;
+      // ✅ LOGIC A: Modern Students (RVM-)
+      if (admissionNo.startsWith('RVM-')) {
+        if (balance <= 0) {
+          dynamicRemark = 'FULL PAID';
+        } else if (nextDate) {
+          const d = new Date(nextDate);
+          dynamicRemark = !isNaN(d.getTime()) 
+            ? `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('en-GB', { month: 'short' })} ${d.getFullYear()}`
+            : 'Date Pending';
         } else {
-          dynamicRemark = student.remarks || 'Pending';
+          dynamicRemark = student.remarks || 'No Remark';
         }
       } 
-      // 3. FALLBACK: Use the original manual remark from the database
+      // ✅ LOGIC B: Legacy Students (Numeric)
       else {
-        dynamicRemark = student.remarks || '';
+        dynamicRemark = student.remarks || 'No Remark';
       }
 
       return {
-        ...student,
+        id: student.id,
+        name: student.name?.trim() || 'Unknown',
+        admission_number: student.admission_number || 'N/A',
+        phone_number: student.phone_number || '',
         remarks: dynamicRemark,
-        total_due_amount: balance
+        total_due_amount: balance,
+        is_defaulter: !!student.is_defaulter 
       };
-    });
+    }).filter(Boolean);
 
     const markedDates = [...new Set(attendanceRecords.map(r => r.date))];
-    const expectedDates = getExpectedSessionDates(startDate, endDate, batchInfo.schedule || [1,2,3,4,5,6]);
+    const expectedDates = typeof getExpectedSessionDates === 'function' 
+      ? getExpectedSessionDates(startDate, endDate, batchInfo.schedule || [1,2,3,4,5,6])
+      : [];
+      
     const missingDates = expectedDates.filter(d => !markedDates.includes(d));
 
     const attendance_by_date = attendanceRecords.reduce((acc, record) => {

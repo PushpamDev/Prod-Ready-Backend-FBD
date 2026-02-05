@@ -20,8 +20,8 @@ exports.getDashboardData = async (req, res) => {
   try {
     /**
      * ✅ EXTENSIVE DATA FETCHING 
-     * We query 'admissions' as base to get 'admitted_by' tracking.
-     * We inner join 'v_admission_financial_summary' for financial metrics.
+     * We query 'admissions' as base to get 'staff' details.
+     * We use !inner join on the view to ensure only records with valid financial data appear.
      */
     let query = supabase
       .from('admissions')
@@ -38,22 +38,15 @@ exports.getDashboardData = async (req, res) => {
       .eq('location_id', userLocationId); 
 
     // ✅ DATE FILTERING
-    // Applied to the physical admissions table column
-    if (startDate) {
-      query = query.gte('date_of_admission', startDate);
-    }
-    if (endDate) {
-      query = query.lte('date_of_admission', endDate);
-    }
+    if (startDate) query = query.gte('date_of_admission', startDate);
+    if (endDate) query = query.lte('date_of_admission', endDate);
 
     // ✅ STATUS FILTER (Paid / Pending)
-    // Applied to the calculated status in the view
     if (status && status !== 'all') {
       query = query.eq('v_admission_financial_summary.status', status);
     }
 
     // ✅ BATCH FILTER
-    // ilike search on batch_preference (from admissions) or batch_name (from view)
     if (batch && batch !== 'all') {
       query = query.ilike('v_admission_financial_summary.batch_name', `%${batch}%`);
     }
@@ -63,20 +56,14 @@ exports.getDashboardData = async (req, res) => {
       query = query.eq('v_admission_financial_summary.undertaking_status', undertaking);
     }
 
-// ✅ FIXED SEARCH LOGIC (Works with joined views)
-    // ✅ SAFE SEARCH LOGIC (Supabase-correct)
-// ✅ CORRECT SEARCH (single OR, single table)
-if (search) {
-  const s = `%${search}%`;
-
-  query = query.or(
-    `student_name.ilike.${s},` +
-    `student_phone_number.ilike.${s},` +
-    `admission_number.ilike.${s}`,
-    { foreignTable: 'v_admission_financial_summary' }
-  );
-}
-
+    // ✅ SEARCH LOGIC
+    if (search) {
+      const s = `%${search}%`;
+      query = query.or(
+        `student_name.ilike.${s},student_phone_number.ilike.${s},admission_number.ilike.${s}`,
+        { foreignTable: 'v_admission_financial_summary' }
+      );
+    }
 
     // Execution & Sorting
     const { data, error } = await query.order('date_of_admission', { ascending: false });
@@ -84,31 +71,20 @@ if (search) {
     if (error) throw error;
 
     // ✅ 2. DATA MERGING & FLATTENING
-    // This merges biographical table data with view-derived financial calculations
-    const uniqueAdmissionsMap = new Map();
-    
-    data.forEach(record => {
-      const financial = record.v_admission_financial_summary?.[0] || {};
-      
-      const admissionRecord = {
-        // Biographical/Physical: id, student_name, father_name, address, id_number, etc.
+    // Fixed: Checking if financial summary is an array or an object
+    const admissions = (data || []).map(record => {
+      const financial = Array.isArray(record.v_admission_financial_summary)
+        ? record.v_admission_financial_summary[0]
+        : record.v_admission_financial_summary;
+
+      return {
         ...record,
-        // Financial/Calculated: total_paid, balance_due, courses_str, batch_name, status
-        ...financial,
-        // Tracking: The staff username who entered the data
+        ...financial, // Spread view calculations into the top level
         processed_by_name: record.staff?.username || 'System'
       };
-
-      // De-duplication check: Ensure we only have one row per admission ID
-      const existing = uniqueAdmissionsMap.get(record.id);
-      if (!existing || (Number(admissionRecord.total_paid) > Number(existing.total_paid))) {
-        uniqueAdmissionsMap.set(record.id, admissionRecord);
-      }
     });
 
-    const admissions = Array.from(uniqueAdmissionsMap.values());
-
-    // ✅ 3. METRICS CALCULATION (Dynamic for Dashboard Cards)
+    // ✅ 3. METRICS CALCULATION
     const now = new Date();
     const currentMonth = now.getMonth();
     const currentYear = now.getFullYear();
@@ -117,16 +93,21 @@ if (search) {
       totalAdmissions: admissions.length,
       
       admissionsThisMonth: admissions.filter(r => {
+        if (!r.date_of_admission) return false;
         const d = new Date(r.date_of_admission);
         return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
       }).length,
 
+      // Total money actually paid by students
       totalCollected: admissions.reduce((sum, r) => sum + Number(r.total_paid || 0), 0),
       
+      // Total money still outstanding
       totalOutstanding: admissions.reduce((sum, r) => sum + Number(r.remaining_due || 0), 0),
 
       // Count students with outstanding balance and 'Pending' status
-      overdueCount: admissions.filter(r => r.status === 'Pending' && r.remaining_due > 0).length,
+      overdueCount: admissions.filter(r => 
+        (r.status === 'Pending' || r.status === 'Partial') && Number(r.remaining_due || 0) > 0
+      ).length,
 
       // Count students who haven't finished their undertakings
       pendingUndertakings: admissions.filter(r => r.undertaking_status === 'Pending').length,
