@@ -244,114 +244,125 @@ exports.recordPayment = async (req, res) => {
 };
 /**
  * @description Get details for the Accounts detail page.
- * [UPDATED] Validates UUID syntax and enforces branch-level security.
+ * [RESOLVED] Fixed path duplication and correctly parsing identification_files JSONB.
  */
 exports.getAccountDetails = async (req, res) => {
   const { admissionId } = req.params;
-  const locationId = req.locationId; // From Auth Middleware
+  const locationId = req.locationId; 
   const isPushpam = req.user?.username === 'pushpam';
 
-  // ✅ 1. Validate UUID syntax to prevent "invalid input syntax for type uuid" error
   if (!admissionId || admissionId === 'undefined') {
-    return res.status(400).json({ 
-      error: 'Invalid Admission ID.', 
-      details: 'The ID received was undefined or missing. Please refresh the page and try again.' 
-    });
+    return res.status(400).json({ error: 'Invalid Admission ID.' });
   }
 
   try {
     const [
-      financialsResult,
+      admissionResult,
       installmentsResult,
       paymentsResult,
-      coursesResult
+      coursesResult,
+      intakeResult 
     ] = await Promise.all([
-      // Added location_id to the select for security check
-      supabase.from('v_admission_financial_summary')
-              .select('student_id, student_name, admission_number, student_phone_number, branch, location_id') 
-              .eq('admission_id', admissionId)
-              .single(),
-      supabase.from('v_installment_status') 
-              .select('id, due_date, amount_due, status') 
-              .eq('admission_id', admissionId)
-              .order('due_date', { ascending: true }),
-      supabase.from('payments')
-              .select('id, payment_date, amount_paid, method, receipt_number, notes, created_by')
-              .eq('admission_id', admissionId)
-              .order('payment_date', { ascending: true }),
-      supabase.from('admission_courses')
-              .select('courses ( name )')
-              .eq('admission_id', admissionId)
+      supabase.from('admissions').select(`*, staff:admitted_by (username)`).eq('id', admissionId).single(),
+      supabase.from('v_installment_status').select('id, due_date, amount_due, status').eq('admission_id', admissionId).order('due_date', { ascending: true }),
+      supabase.from('payments').select('id, payment_date, amount_paid, method, receipt_number, notes, created_by').eq('admission_id', admissionId).order('payment_date', { ascending: true }),
+      supabase.from('admission_courses').select('courses ( name )').eq('admission_id', admissionId),
+      supabase.from('admission_intakes').select('identification_files').eq('admission_id', admissionId).maybeSingle()
     ]);
 
-    // Handle initial database errors
-    if (financialsResult.error) throw financialsResult.error;
-    if (installmentsResult.error) throw installmentsResult.error;
-    if (paymentsResult.error) throw paymentsResult.error;
-    if (coursesResult.error) throw coursesResult.error;
+    if (admissionResult.error) throw admissionResult.error;
+    const admission = admissionResult.data;
 
-    const financials = financialsResult.data;
-
-    // ✅ 2. Branch Security Gate: 
-    // Only allow access if the branch matches OR user is pushpam
-    if (!isPushpam && Number(financials.location_id) !== Number(locationId)) {
-      return res.status(403).json({ error: 'Access denied: This record belongs to another branch.' });
+    if (!isPushpam && Number(admission.location_id) !== Number(locationId)) {
+      return res.status(403).json({ error: 'Access denied: Branch mismatch.' });
     }
 
-    // --- STAFF LOOKUP LOGIC ---
-    const rawPayments = paymentsResult.data || [];
-    let paymentsWithStaff = [];
+    // --- NEW DOCUMENT PATH EXTRACTION LOGIC ---
+    let idCardUrls = [];
+    
+    // Extracting from identification_files (Your new record format)
+    const intakeFiles = intakeResult.data?.identification_files || [];
+    const undertakingFiles = admission.undertaking_files || [];
+    const combinedFiles = [...(Array.isArray(intakeFiles) ? intakeFiles : []), ...(Array.isArray(undertakingFiles) ? undertakingFiles : [])];
 
-    if (rawPayments.length > 0) {
-      const staffIds = [...new Set(rawPayments.map(p => p.created_by).filter(Boolean))];
+    if (combinedFiles.length > 0) {
+      idCardUrls = combinedFiles.map(fileObj => {
+        // ✅ CRITICAL FIX: Your records store the full path in 'path' property
+        // Example: "intakes/019fdb4e.../f114bc69..._IMG_7108.jpeg"
+        let storagePath = "";
+        
+        if (typeof fileObj === 'object' && fileObj !== null) {
+          // Use the 'path' property if it exists, otherwise fall back to 'file_name'
+          storagePath = fileObj.path || `intakes/${admissionId}/${fileObj.file_name}`;
+        } else {
+          storagePath = `intakes/${admissionId}/${fileObj}`;
+        }
 
-      const { data: userData, error: userError } = await supabase
-        .from('users') 
-        .select('id, username')
-        .in('id', staffIds);
+        // Safety check to ensure we don't return broken URLs
+        if (!storagePath || storagePath.includes('[object Object]')) return null;
 
-      if (userError) console.warn("Could not fetch staff usernames:", userError);
-
-      const staffMap = {};
-      (userData || []).forEach(u => { staffMap[u.id] = u.username; });
-
-      paymentsWithStaff = rawPayments.map(p => ({
-        ...p,
-        collected_by: staffMap[p.created_by] || 'System'
-      }));
+        const { data } = supabase.storage
+          .from('identification')
+          .getPublicUrl(storagePath);
+        
+        return data.publicUrl;
+      }).filter(Boolean);
     }
 
-    const installments = installmentsResult.data || [];
-    const calculatedTotalFees = installments.reduce((sum, inst) => sum + Number(inst.amount_due), 0);
-    const totalPaid = paymentsWithStaff.reduce((sum, p) => sum + Number(p.amount_paid), 0);
+    // --- FALLBACK: Physical Folder Scan ---
+    if (idCardUrls.length === 0) {
+      const { data: storageFiles } = await supabase.storage
+        .from('identification')
+        .list(`intakes/${admissionId}`);
+      
+      if (storageFiles && storageFiles.length > 0) {
+        idCardUrls = storageFiles
+          .filter(f => f.name !== '.emptyFolderPlaceholder')
+          .map(f => {
+            const { data } = supabase.storage
+              .from('identification')
+              .getPublicUrl(`intakes/${admissionId}/${f.name}`);
+            return data.publicUrl;
+          });
+      }
+    }
 
-    const responseData = {
-      student_id: financials.student_id,
-      admission_number: financials.admission_number,
-      name: financials.student_name,
-      phones: [financials.student_phone_number],
-      branch: financials.branch,
-      total_fees: calculatedTotalFees,
-      total_paid: totalPaid,
-      balance: calculatedTotalFees - totalPaid,
-      installments: installments.map(inst => ({
-        id: inst.id,
-        due_date: inst.due_date,
-        amount: inst.amount_due, 
-        status: inst.status
-      })),
+    // Branch Mapping
+    const branchMap = { 1: "Faridabad", 2: "Pune", 3: "Ahmedabad" };
+    
+    // Staff Map for Payments
+    const staffIds = [...new Set((paymentsResult.data || []).map(p => p.created_by).filter(Boolean))];
+    const { data: userData } = await supabase.from('users').select('id, username').in('id', staffIds);
+    const staffMap = {};
+    (userData || []).forEach(u => { staffMap[u.id] = u.username; });
+
+    const paymentsWithStaff = (paymentsResult.data || []).map(p => ({
+      ...p,
+      collected_by: staffMap[p.created_by] || 'System'
+    }));
+
+    res.status(200).json({
+      name: admission.student_name,
+      father_name: admission.father_name || 'N/A',
+      phone: admission.student_phone_number,
+      father_phone: admission.father_phone_number || 'N/A',
+      address: admission.current_address || 'N/A',
+      id_type: admission.identification_type || 'Aadhar Card',
+      id_number: admission.identification_number || 'N/A',
+      admission_date: admission.date_of_admission,
+      admitted_by: admission.staff?.username || 'System',
+      branch: branchMap[admission.location_id] || "Faridabad",
+      total_fees: installmentsResult.data?.reduce((sum, i) => sum + Number(i.amount_due), 0) || 0,
+      total_paid: paymentsWithStaff.reduce((sum, p) => sum + Number(p.amount_paid), 0) || 0,
+      balance: (installmentsResult.data?.reduce((sum, i) => sum + Number(i.amount_due), 0) || 0) - (paymentsWithStaff.reduce((sum, p) => sum + Number(p.amount_paid), 0) || 0),
+      installments: (installmentsResult.data || []).map(i => ({ id: i.id, due_date: i.due_date, amount: i.amount_due, status: i.status })),
       payments: paymentsWithStaff,
-      courses: (coursesResult.data || []).map(c => c.courses?.name).filter(Boolean)
-    };
-
-    res.status(200).json(responseData);
+      courses: (coursesResult.data || []).map(c => c.courses?.name).filter(Boolean),
+      documents: [...new Set(idCardUrls)] // Deduplicate URLs
+    });
 
   } catch (error) {
     console.error(`Error fetching account details:`, error);
-    // Specifically catch Postgres UUID type errors to give better feedback
-    if (error.code === '22P02') {
-      return res.status(400).json({ error: 'Invalid ID format.', details: 'The system expected a UUID but received something else.' });
-    }
     res.status(500).json({ error: 'An unexpected server error occurred.' });
   }
 };
