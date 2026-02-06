@@ -216,6 +216,7 @@ const getBatchAttendanceReport = async (req, res) => {
 };
 /**
  * UPDATED: Single Faculty Audit Report
+ * Now includes BOTH Active and Completed batches.
  * Includes Date Filters and Math Guards to prevent 100%+ attendance discrepancies.
  */
 const getFacultyAttendanceReport = async (req, res) => {
@@ -251,13 +252,16 @@ const getFacultyAttendanceReport = async (req, res) => {
       supabase.from('faculty_substitutions').select('*').in('batch_id', involvedBatchIds)
     ]);
 
-    const activeBatches = allBatches.data.filter(b => getDynamicStatus(b.start_date, b.end_date) === "active");
+    // ✅ REMOVED: .filter(b => getDynamicStatus(...) === "active")
+    // This allows the engine to process batches regardless of their current status.
+    const batchesToProcess = allBatches.data || [];
+    
     const batchStudentCounts = studentLinks.data.reduce((acc, link) => ({ ...acc, [link.batch_id]: (acc[link.batch_id] || 0) + 1 }), {});
 
     let totalPresentGlobal = 0;
     let globalPossibleGlobal = 0;
 
-    const batchReports = activeBatches.map(batch => {
+    const batchReports = batchesToProcess.map(batch => {
       const studentCount = batchStudentCounts[batch.id] || 0;
       
       // Calculate expected sessions strictly within the user-defined Audit Range
@@ -291,6 +295,8 @@ const getFacultyAttendanceReport = async (req, res) => {
       return {
         batch_id: batch.id,
         batch_name: batch.name,
+        // ✅ Added status helper so the frontend can display the correct badge
+        status: getDynamicStatus(batch.start_date, batch.end_date),
         student_count: studentCount,
         total_sessions: sessionCount,
         attendance_percentage: maxPossibleMarks > 0 
@@ -316,7 +322,6 @@ const getFacultyAttendanceReport = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
-
 const getOverallAttendanceReport = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;

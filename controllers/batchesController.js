@@ -16,19 +16,14 @@ const getDynamicStatus = (startDate, endDate) => {
 
 const getAllBatches = async (req, res) => {
   try {
-    // --- NEW --- Check for auth and locationId
     if (!req.locationId) {
       return res.status(401).json({ error: 'Authentication required with location.' });
     }
 
     const today = new Date().toISOString().split('T')[0];
-    
-    // --- NEW --- Check for the facultyId query param from the frontend
-    const { facultyId } = req.query;
+    const { facultyId } = req.query; // Removed 'status' from destructurer to avoid pre-filtering
 
     const [batchesResult, substitutionsResult, allFacultiesResult] = await Promise.all([
-      // This is an IIFE (Immediately Invoked Function Expression)
-      // to build the query dynamically
       (() => {
         let query = supabase.from('batches').select(`
           *,
@@ -37,16 +32,23 @@ const getAllBatches = async (req, res) => {
           students:batch_students(count)
         `).eq('location_id', req.locationId);
         
-        // --- NEW --- If the facultyId query param exists, add it to the query
         if (facultyId) {
           query = query.eq('faculty_id', facultyId);
         }
+
+        // ✅ REMOVED query.ilike('status', status) 
+        // We fetch all records so our 'getDynamicStatus' helper can 
+        // accurately categorize them regardless of what the DB column says.
         
         return query;
-      })(), // Immediately invoke this query-building function
+      })(),
 
-      // These other queries are correct and location-filtered
-      supabase.from('faculty_substitutions').select(`*, substitute:substitute_faculty_id(*), batches!inner(location_id)`).lte('start_date', today).gte('end_date', today).eq('batches.location_id', req.locationId),
+      supabase.from('faculty_substitutions')
+        .select(`*, substitute:substitute_faculty_id(*), batches!inner(location_id)`)
+        .lte('start_date', today)
+        .gte('end_date', today)
+        .eq('batches.location_id', req.locationId),
+
       supabase.from('faculty').select('*').eq('location_id', req.locationId)
     ]);
 
@@ -61,18 +63,19 @@ const getAllBatches = async (req, res) => {
     const formattedData = allBatches.map(batch => {
       const activeSub = activeSubstitutions.find(sub => sub.batch_id === batch.id);
       
+      // ✅ HELPER LOGIC: This determines if it's 'active' or 'completed' 
+      // based on CURRENT TIME.
+      const currentStatus = getDynamicStatus(batch.start_date, batch.end_date);
+
       let finalBatch = {
         ...batch,
-        status: getDynamicStatus(batch.start_date, batch.end_date),
-        // The student data from the query is an object like [{ count: 15 }].
-        // We extract the number here. This is what the frontend BatchTable expects.
+        status: currentStatus, 
         students: batch.students[0]?.count || 0,
         isSubstituted: false,
       };
 
       if (activeSub && activeSub.substitute) {
         const originalFaculty = allFaculties.find(f => f.id === activeSub.original_faculty_id);
-        
         finalBatch.isSubstituted = true;
         finalBatch.faculty = activeSub.substitute;
         finalBatch.faculty_id = activeSub.substitute_faculty_id;
@@ -83,8 +86,10 @@ const getAllBatches = async (req, res) => {
       return finalBatch;
     });
     
+    // Logic for Faculty Users
     if (req.user && req.user.role === 'faculty') {
-        const facultyBatches = formattedData.filter(batch => batch.faculty_id === req.user.faculty_id);
+        const targetFacultyId = req.user.faculty_id;
+        const facultyBatches = formattedData.filter(batch => batch.faculty_id === targetFacultyId);
         return res.json(facultyBatches);
     }
 
@@ -94,7 +99,6 @@ const getAllBatches = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
-
 const createBatch = async (req, res) => {
   // --- NEW --- This route MUST be protected by auth to get req.locationId
   if (!req.locationId) {
