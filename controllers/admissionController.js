@@ -348,3 +348,48 @@ exports.checkAdmissionByPhone = async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 };
+
+  /**
+   * @description
+   * Mark a student as a Dropout.
+   * This sets 'joined' to false and adds a dropout reason to remarks.
+   * Dropouts are excluded from follow-up tasks and active counts.
+   */
+  exports.markStudentDropout = async (req, res) => {
+    const { id } = req.params;
+    const { dropout_reason } = req.body;
+    const userId = req.user?.id;
+
+    // ✅ CRITICAL FIX: Explicitly check for 'undefined' as a string
+    if (!id || id === 'undefined' || id.length < 30) {
+      return res.status(400).json({ error: "Invalid Admission ID. Check if the ID is being passed from the frontend." });
+    }
+
+    if (req.user?.username !== 'pushpam') {
+      return res.status(403).json({ error: "Access denied." });
+    }
+
+    try {
+      const { error: updateError } = await supabase
+        .from('admissions')
+        .update({ 
+          joined: false, //
+          remarks: `DROPOUT: ${dropout_reason}` 
+        })
+        .eq('id', id);
+
+      if (updateError) throw updateError;
+
+      // Add to Remark History
+      await supabase.from('admission_remarks').insert([{
+        admission_id: id,
+        remark_text: `MARKED AS DROPOUT. Reason: ${dropout_reason}`,
+        created_by: userId
+      }]);
+
+      res.status(200).json({ message: 'Dropout processed.' });
+    } catch (error) {
+      console.error('Dropout Error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  };

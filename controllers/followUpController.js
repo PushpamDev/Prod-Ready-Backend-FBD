@@ -3,7 +3,7 @@ const { format } = require('date-fns');
 
 /**
  * @description Get the task list for the main follow-up dashboard.
- * [UPDATED] Added 'pushpam' override for global view.
+ * [UPDATED] Added 'joined' filter to exclude dropouts and 'pushpam' override.
  */
 exports.getFollowUpTasks = async (req, res) => {
   const { dateFilter, searchTerm, batchName, assignedTo, dueAmountMin, startDate, endDate } = req.query;
@@ -20,6 +20,10 @@ exports.getFollowUpTasks = async (req, res) => {
         q = q.eq('location_id', locationId);
       }
       
+      // ✅ DROPOUT FIX: Strictly only show students who are still joined
+      // This removes dropouts from the follow-up dashboard automatically.
+      q = q.eq('joined', true);
+      
       q = q.gt('total_due_amount', 0);
       
       if (searchTerm) {
@@ -31,7 +35,7 @@ exports.getFollowUpTasks = async (req, res) => {
       return q;
     };
 
-    // 1-3. Fetch Counts
+    // 1-3. Fetch Counts (Now excluding dropouts via buildBaseFilters)
     const [todayRes, overdueRes, upcomingRes] = await Promise.all([
       buildBaseFilters(supabase.from('v_follow_up_task_list').select('*', { count: 'exact', head: true }))
         .eq('next_task_due_date', today)
@@ -77,8 +81,7 @@ exports.getFollowUpTasks = async (req, res) => {
     }
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
-};
-
+};g
 /**
  * @description Create a follow-up log.
  * [FIXED] Robust branch validation with student-table fallback for 'null' locations.
