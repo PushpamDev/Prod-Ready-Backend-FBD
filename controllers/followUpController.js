@@ -81,7 +81,7 @@ exports.getFollowUpTasks = async (req, res) => {
     }
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
-};g
+};
 /**
  * @description Create a follow-up log.
  * [FIXED] Robust branch validation with student-table fallback for 'null' locations.

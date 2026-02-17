@@ -241,12 +241,11 @@ exports.createAdmission = async (req, res) => {
  * @description
  * Update an existing admission.
  * STRICT SECURITY: Only user 'pushpam' can proceed.
- * Updated to record the user who performed the update.
  */
 exports.updateAdmission = async (req, res) => {
   const { id } = req.params;
 
-  // Security Gate: Verified against user profile
+  // Security Gate
   if (req.user?.username !== 'pushpam') {
     return res.status(403).json({
       error: "Access denied. Only 'pushpam' can edit admissions.",
@@ -272,16 +271,10 @@ exports.updateAdmission = async (req, res) => {
     installments, 
   } = req.body;
 
-  const locationIdStr = req.locationId ? String(req.locationId) : null;
-  const userId = req.user?.id; // Capture the editor's ID for the audit trail
+  const locationId = req.locationId;
+  const userId = req.user?.id;
 
   try {
-    // Basic validation for installments
-    if (installments && !Array.isArray(installments)) {
-      return res.status(400).json({ error: "Installments must be an array." });
-    }
-
-    // RPC call updated with editor tracking
     const { error } = await supabase.rpc('update_admission_full', {
       p_admission_id: id,
       p_student_name: student_name,
@@ -296,14 +289,13 @@ exports.updateAdmission = async (req, res) => {
       p_course_start_date: course_start_date || null,
       p_batch_preference: batch_preference || null,
       p_remarks: remarks || null,
-      p_certificate_id: (certificate_id && certificate_id !== 'null' && certificate_id.length > 20) 
-        ? certificate_id 
-        : null,
+      // Handle the common "null" string or empty value from frontend
+      p_certificate_id: (certificate_id && certificate_id !== 'null' && certificate_id !== '') ? certificate_id : null,
       p_discount: Number(discount) || 0,
       p_course_ids: Array.isArray(course_ids) ? course_ids : [],
-      p_installments: installments || [], 
-      p_location_id: locationIdStr,
-      p_updated_by: userId, // <--- Add this to your update_admission_full SQL function
+      p_installments: Array.isArray(installments) ? installments : [], 
+      p_location_id: locationId,
+      p_updated_by: userId // Matches the new SQL parameter
     });
 
     if (error) throw error;
