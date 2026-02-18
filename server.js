@@ -31,7 +31,7 @@ const batchAllotmentRoutes = require('./routes/batchAllotmentRoutes');
 const ceoRoutes = require("./routes/ceo");
 const paymentLedgerRoutes = require('./routes/paymentLedgerRoutes');
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 const auth = require("./middleware/auth");
 
 app.use(cors());

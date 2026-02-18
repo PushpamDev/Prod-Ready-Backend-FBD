@@ -241,40 +241,37 @@ exports.createAdmission = async (req, res) => {
  * @description
  * Update an existing admission.
  * STRICT SECURITY: Only user 'pushpam' can proceed.
+ * This function uses the 'update_admission_full' RPC to sync students, 
+ * admissions, courses, and installments in a single transaction.
  */
 exports.updateAdmission = async (req, res) => {
   const { id } = req.params;
-
+  
   // Security Gate
   if (req.user?.username !== 'pushpam') {
-    return res.status(403).json({
-      error: "Access denied. Only 'pushpam' can edit admissions.",
-    });
+    return res.status(403).json({ error: "Access denied." });
   }
 
   const {
-    student_name,
-    student_phone_number,
-    father_name,
-    father_phone_number,
-    permanent_address,
-    current_address,
-    identification_type,
-    identification_number,
-    date_of_admission,
-    course_start_date,
-    batch_preference,
-    remarks,
-    certificate_id,
-    discount,
-    course_ids,
-    installments, 
+    student_name, student_phone_number, father_name, father_phone_number,
+    permanent_address, current_address, identification_type, identification_number,
+    date_of_admission, course_start_date, batch_preference, remarks,
+    certificate_id, discount, course_ids, installments
   } = req.body;
 
-  const locationId = req.locationId;
+  // locationId is likely 1, 2, or 3
+  const locationId = req.locationId; 
   const userId = req.user?.id;
 
   try {
+    // ✅ FIX: Ensure locationId is treated as a string for the RPC, 
+    // but don't force it to null if it's a short ID (integer).
+    const finalLocationId = locationId ? String(locationId) : null;
+
+    if (!finalLocationId) {
+       return res.status(400).json({ error: "Location identification is missing. Please re-login." });
+    }
+
     const { error } = await supabase.rpc('update_admission_full', {
       p_admission_id: id,
       p_student_name: student_name,
@@ -289,26 +286,22 @@ exports.updateAdmission = async (req, res) => {
       p_course_start_date: course_start_date || null,
       p_batch_preference: batch_preference || null,
       p_remarks: remarks || null,
-      // Handle the common "null" string or empty value from frontend
-      p_certificate_id: (certificate_id && certificate_id !== 'null' && certificate_id !== '') ? certificate_id : null,
+      p_certificate_id: (certificate_id && certificate_id !== 'null' && certificate_id.length > 20) ? certificate_id : null,
       p_discount: Number(discount) || 0,
       p_course_ids: Array.isArray(course_ids) ? course_ids : [],
       p_installments: Array.isArray(installments) ? installments : [], 
-      p_location_id: locationId,
-      p_updated_by: userId // Matches the new SQL parameter
+      p_location_id: finalLocationId, 
+      p_updated_by: userId
     });
 
     if (error) throw error;
-
     res.status(200).json({ message: 'Admission updated successfully' });
+
   } catch (error) {
-    console.error('Error updating admission:', error);
-    res.status(500).json({
-      error: error.message || 'Error updating admission.',
-    });
+    console.error('Update Error:', error);
+    res.status(500).json({ error: error.message });
   }
 };
-
 
 exports.checkAdmissionByPhone = async (req, res) => {
   try {
