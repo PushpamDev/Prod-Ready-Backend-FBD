@@ -1,5 +1,3 @@
-// server/controllers/intakeController.js
-
 const supabase = require('../db.js');
 const multer = require('multer');
 const crypto = require('crypto');
@@ -34,6 +32,7 @@ exports.createIntake = async (req, res) => {
 
     /* 2️⃣ Create fresh intake */
     const {
+      location_id,          // ✅ Captured from Step 1 dropdown
       student_name,
       father_name,
       father_phone_number,
@@ -44,13 +43,14 @@ exports.createIntake = async (req, res) => {
       identification_number,
       course_ids,
       fee_amount,
-      current_address,      // Added field
-      permanent_address     // Added field
+      current_address,      
+      permanent_address     
     } = req.body;
 
     const { data, error } = await supabase
       .from('admission_intakes')
       .insert({
+        location_id,        // ✅ Inserted to DB
         student_name,
         student_phone_number,
         father_name,
@@ -62,8 +62,8 @@ exports.createIntake = async (req, res) => {
         identification_number,
         course_ids,
         fee_amount,
-        current_address,    // Inserted to DB
-        permanent_address,  // Inserted to DB
+        current_address,    
+        permanent_address,  
         video_completed: false,
         contacts_acknowledged: false,
         terms_accepted: false,
@@ -122,7 +122,12 @@ exports.uploadIntakeFiles = [
       const uploadedFiles = [];
 
       for (const file of files) {
-        const safeFileName = file.originalname.replace(/\s+/g, '_');
+        // ✅ Aggressive sanitization to remove brackets, parentheses, and other invalid characters
+        const safeFileName = file.originalname
+          .replace(/\s+/g, '_')           // Replace spaces with underscores
+          .replace(/[^a-zA-Z0-9._-]/g, '') // Remove anything that isn't alphanumeric, dot, or hyphen
+          .replace(/_{2,}/g, '_');        // Clean up double underscores if any
+
         const filePath = `intakes/${id}/${crypto.randomUUID()}_${safeFileName}`;
 
         const { error: uploadError } = await supabase.storage
@@ -133,11 +138,13 @@ exports.uploadIntakeFiles = [
           });
 
         if (uploadError) {
+          // If Supabase returns an error, log the specific path that failed
+          console.error(`Upload failed for path: ${filePath}`);
           throw uploadError;
         }
 
         uploadedFiles.push({
-          file_name: file.originalname,
+          file_name: file.originalname, // Keep original name for display purposes
           bucket: 'identification',
           path: filePath,
           uploaded_at: new Date().toISOString(),
@@ -165,7 +172,7 @@ exports.uploadIntakeFiles = [
     } catch (err) {
       console.error('Upload Intake Files Error:', err);
       return res.status(500).json({
-        error: 'Failed to upload identification documents',
+        error: err.message || 'Failed to upload identification documents',
       });
     }
   },
@@ -209,6 +216,7 @@ exports.proceedToAdmission = async (req, res) => {
 
     res.json({
       prefill: {
+        location_id: data.location_id,            // ✅ Included in prefill
         student_name: data.student_name,
         student_phone_number: data.student_phone_number,
         father_name: data.father_name,
@@ -217,8 +225,8 @@ exports.proceedToAdmission = async (req, res) => {
         identification_number: data.identification_number,
         course_ids: data.course_ids,
         course_start_date: data.date_of_joining,
-        current_address: data.current_address,    // Added to prefill
-        permanent_address: data.permanent_address  // Added to prefill
+        current_address: data.current_address,    
+        permanent_address: data.permanent_address  
       }
     });
 
@@ -259,10 +267,6 @@ exports.finalizeIntake = async (req, res) => {
       terms_accepted,
     } = req.body;
 
-    /**
-     * FIX: Use loose equality or check for truthy values.
-     * This handles both boolean true AND the string "true".
-     */
     const isVideoDone = video_completed === true || video_completed === 'true';
     const isContactsDone = contacts_acknowledged === true || contacts_acknowledged === 'true';
     const isTermsDone = terms_accepted === true || terms_accepted === 'true';
@@ -270,7 +274,7 @@ exports.finalizeIntake = async (req, res) => {
     if (!isVideoDone || !isContactsDone || !isTermsDone) {
       return res.status(400).json({
         error: 'All undertaking steps must be completed',
-        received: { video_completed, contacts_acknowledged, terms_accepted } // Useful for debugging
+        received: { video_completed, contacts_acknowledged, terms_accepted } 
       });
     }
 
