@@ -57,21 +57,22 @@ const createTicket = async (req, res) => {
   }
 };
 
-// --- GET ALL TICKETS (FIXED DASHBOARD LOGIC) ---
+// --- GET ALL TICKETS ---
 const getAllTickets = async (req, res) => {
-  if (!req.locationId) {
+  const isSuperAdmin = req.isSuperAdmin; 
+
+  if (!isSuperAdmin && !req.locationId) {
     return res.status(401).json({ error: 'Authentication required with location.' });
   }
 
   try {
-    const { status, search, category, page = 1, limit = 15 } = req.query;
+    const { status, search, category, page = 1, limit = 15, from, to } = req.query;
     const offset = (page - 1) * limit;
     const userId = req.user.id;
     const userRole = req.user.role; 
-    const isSuperAdmin = req.isSuperAdmin; // ✅ Replaced hardcoded check
 
-    // 1. Build Base Queries
-    let countQuery = supabase.from('tickets').select('status, assignee_id, student_id').eq('location_id', req.locationId);
+    // 1. Initialize Base Queries
+    let countQuery = supabase.from('tickets').select('status, assignee_id, student_id, created_at', { count: 'exact' });
     let mainQuery = supabase
       .from('tickets')
       .select(`
@@ -79,24 +80,42 @@ const getAllTickets = async (req, res) => {
         student:students(id, name, student_ticket_count:tickets(count)),
         assignee:users(id, username),
         assignee_id,
-        student_id
-      `, { count: 'exact' })
-      .eq('location_id', req.locationId);
+        student_id,
+        location_id
+      `, { count: 'exact' });
 
-    // --- ROLE-BASED FILTERING ---
+    // 2. Apply Location Filter (Skip for Super Admin viewing global queue)
+    if (!isSuperAdmin) {
+      countQuery = countQuery.eq('location_id', req.locationId);
+      mainQuery = mainQuery.eq('location_id', req.locationId);
+    }
+
+    // 3. Apply Role Filters
     if (userRole === 'student') {
-      // Students only see their own tickets
       countQuery = countQuery.eq('student_id', userId);
       mainQuery = mainQuery.eq('student_id', userId);
     } else if (userRole === 'admin' && !isSuperAdmin) {
-      // ✅ Standard admins only see tickets assigned to them
       countQuery = countQuery.eq('assignee_id', userId);
       mainQuery = mainQuery.eq('assignee_id', userId);
-    } 
-    // If super_admin, no extra filter is added (sees all for that location)
+    }
 
-    // 2. Fetch Counts for UI
-    const { data: countData } = await countQuery;
+    // 4. Apply Date Range Filters
+    if (from) {
+      countQuery = countQuery.gte('created_at', from);
+      mainQuery = mainQuery.gte('created_at', from);
+    }
+    if (to) {
+      // Set to end of day to include tickets created on the 'to' date
+      const toDate = new Date(to);
+      toDate.setHours(23, 59, 59, 999);
+      countQuery = countQuery.lte('created_at', toDate.toISOString());
+      mainQuery = mainQuery.lte('created_at', toDate.toISOString());
+    }
+
+    // 5. Fetch Counts based on filtering
+    const { data: countData, error: countError } = await countQuery;
+    if (countError) throw countError;
+
     const counts = {
       All: countData?.length || 0,
       Open: countData?.filter(t => t.status === 'Open').length || 0,
@@ -104,14 +123,14 @@ const getAllTickets = async (req, res) => {
       Resolved: countData?.filter(t => t.status === 'Resolved').length || 0,
     };
 
-    // 3. Apply Filters
+    // 6. Apply Search and Category Filters
     if (status && status !== 'All') mainQuery = mainQuery.eq('status', status);
     if (category && category !== 'All') mainQuery = mainQuery.eq('category', category);
     if (search) {
       mainQuery = mainQuery.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
     }
 
-    // 4. Execute Main Query
+    // 7. Final Execution
     const { data: tickets, error, count } = await mainQuery
       .order('created_at', { ascending: false })
       .range(offset, offset + limit - 1);
@@ -132,7 +151,7 @@ const getAllTickets = async (req, res) => {
     });
 
   } catch (error) {
-     console.error("Internal server error while getting tickets:", error);
+     console.error("Server error getting tickets:", error);
      res.status(500).json({ error: "Internal server error" });
   }
 };
