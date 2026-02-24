@@ -67,8 +67,8 @@ const getAllTickets = async (req, res) => {
     const { status, search, category, page = 1, limit = 15 } = req.query;
     const offset = (page - 1) * limit;
     const userId = req.user.id;
-    const userRole = req.user.role; // Ensure your auth middleware provides the role
-    const isPushpam = req.user.username === 'pushpam';
+    const userRole = req.user.role; 
+    const isSuperAdmin = req.isSuperAdmin; // ✅ Replaced hardcoded check
 
     // 1. Build Base Queries
     let countQuery = supabase.from('tickets').select('status, assignee_id, student_id').eq('location_id', req.locationId);
@@ -83,17 +83,17 @@ const getAllTickets = async (req, res) => {
       `, { count: 'exact' })
       .eq('location_id', req.locationId);
 
-    // --- NEW LOGIC: Role-Based Filtering ---
+    // --- ROLE-BASED FILTERING ---
     if (userRole === 'student') {
       // Students only see their own tickets
       countQuery = countQuery.eq('student_id', userId);
       mainQuery = mainQuery.eq('student_id', userId);
-    } else if (userRole === 'admin' && !isPushpam) {
-      // Non-Pushpam admins only see tickets assigned to them
+    } else if (userRole === 'admin' && !isSuperAdmin) {
+      // ✅ Standard admins only see tickets assigned to them
       countQuery = countQuery.eq('assignee_id', userId);
       mainQuery = mainQuery.eq('assignee_id', userId);
     } 
-    // If Pushpam, no extra filter is added (sees all for that location)
+    // If super_admin, no extra filter is added (sees all for that location)
 
     // 2. Fetch Counts for UI
     const { data: countData } = await countQuery;
@@ -104,7 +104,7 @@ const getAllTickets = async (req, res) => {
       Resolved: countData?.filter(t => t.status === 'Resolved').length || 0,
     };
 
-    // 3. Apply Filters (Status, Search, Category)
+    // 3. Apply Filters
     if (status && status !== 'All') mainQuery = mainQuery.eq('status', status);
     if (category && category !== 'All') mainQuery = mainQuery.eq('category', category);
     if (search) {
@@ -136,6 +136,7 @@ const getAllTickets = async (req, res) => {
      res.status(500).json({ error: "Internal server error" });
   }
 };
+
 // --- GET TICKET BY ID ---
 const getTicketById = async (req, res) => {
   const { id } = req.params;
@@ -161,7 +162,7 @@ const getTicketById = async (req, res) => {
 const updateTicket = async (req, res) => {
   const { id } = req.params;
   const { assignee_id, status, priority } = req.body;
-  const isPushpam = req.user.username === 'pushpam';
+  const isSuperAdmin = req.isSuperAdmin; // ✅ Replaced hardcoded check
   
   const updatePayload = {};
   if (status) updatePayload.status = status;
@@ -171,9 +172,10 @@ const updateTicket = async (req, res) => {
   try {
     if (assignee_id) {
       const { data: currentTicket } = await supabase.from('tickets').select('assignee_id').eq('id', id).single();
-      // Block reassignment if already assigned and user is not Pushpam
-      if (currentTicket.assignee_id && !isPushpam) {
-        return res.status(403).json({ error: "Forbidden: Only Pushpam can reassign tickets already in progress." });
+      
+      // ✅ BLOCK REASSIGNMENT: If already assigned and user is not super_admin
+      if (currentTicket.assignee_id && !isSuperAdmin) {
+        return res.status(403).json({ error: "Forbidden: Only a Super Admin can reassign tickets already in progress." });
       }
     }
     
@@ -258,17 +260,16 @@ const getTicketCategories = async (req, res) => {
   }
 };
 
-// --- POST CHAT MESSAGE (FIXED FOR STUDENT VS ADMIN) ---
+// --- POST CHAT MESSAGE ---
 const postChatMessage = async (req, res) => {
     const { ticketId } = req.params;
     const { message } = req.body;
     const senderId = req.user.id; 
-    const userRole = req.user.role; // Ensure your auth middleware passes the role
+    const userRole = req.user.role; 
 
     if (!message) return res.status(400).json({ error: 'Message cannot be empty.' });
 
     try {
-        // 1. Guard: Check if ticket is resolved
         const { data: ticket, error: ticketErr } = await supabase
             .from('tickets')
             .select('status')
@@ -280,19 +281,17 @@ const postChatMessage = async (req, res) => {
             return res.status(403).json({ error: 'Cannot reply to a resolved ticket. Please reopen it first.' });
         }
 
-        // 2. Logic: Assign ID to the correct column based on role
         const chatPayload = {
             ticket_id: ticketId,
             message: message
         };
 
-        if (userRole === 'admin') {
+        if (userRole === 'admin' || userRole === 'super_admin') {
             chatPayload.sender_user_id = senderId;
         } else {
             chatPayload.sender_student_id = senderId;
         }
 
-        // 3. Insert the message
         const { data: newMessage, error: insertErr } = await supabase
             .from('ticket_chats')
             .insert([chatPayload])
@@ -310,7 +309,6 @@ const postChatMessage = async (req, res) => {
 
     } catch (error) {
         console.error("Error in postChatMessage:", error);
-        // Handle the foreign key error gracefully
         if (error.code === '23503') {
             return res.status(400).json({ error: "Invalid sender ID. User/Student record not found." });
         }
@@ -323,7 +321,7 @@ const getChatMessages = async (req, res) => {
 
   try {
     const { data: messages, error } = await supabase
-      .from('ticket_chats') // Matches the SQL table created above
+      .from('ticket_chats')
       .select(`
         id,
         message,
@@ -344,6 +342,7 @@ const getChatMessages = async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 };
+
 module.exports = {
   createTicket,
   getAllTickets,

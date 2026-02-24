@@ -3,8 +3,8 @@ const supabase = require("../db");
 
 /**
  * @description 
- * Executive Dashboard Controller for Pushpam.
- * Now includes Deep Support Intelligence (Category trends & Assignee performance).
+ * Executive Dashboard Controller for Super Admins.
+ * Includes Deep Support Intelligence (Category trends & Assignee performance).
  */
 
 const getDynamicStatus = (startDate, endDate) => {
@@ -20,9 +20,9 @@ const getDynamicStatus = (startDate, endDate) => {
 };
 
 exports.getCEODashboard = async (req, res) => {
-  // Strict Access Control for Pushpam
-  if (req.user?.username !== "pushpam") {
-    return res.status(403).json({ error: "Access denied" });
+  // ✅ ROLE-BASED ACCESS CONTROL: Restricted to super_admin
+  if (!req.isSuperAdmin) {
+    return res.status(403).json({ error: "Access denied. Executive privileges required." });
   }
 
   const { from, to, location } = req.query;
@@ -45,7 +45,7 @@ exports.getCEODashboard = async (req, res) => {
       admissionsRes, 
       batchesRes,
       paymentsRes,
-      ticketsRes, // ✅ UPDATED for deep intelligence
+      ticketsRes,
       followUpsRes,
       facultyRes,
       projectedRes,
@@ -61,7 +61,6 @@ exports.getCEODashboard = async (req, res) => {
         .gte("payment_date", from)
         .lte("payment_date", to),
       
-      // ✅ MODIFIED: Fetching categories and assignee data for CEO analytics
       applyLoc(supabase.from("tickets").select(`
         status, 
         category, 
@@ -105,7 +104,7 @@ exports.getCEODashboard = async (req, res) => {
       (sum, i) => sum + Number(i.amount || 0), 0
     );
 
-    // 4. Support Intelligence Analytics (NEW)
+    // 4. Support Intelligence Analytics
     const ticketData = ticketsRes.data || [];
     const supportStats = {
       totalTickets: ticketData.length,
@@ -114,13 +113,11 @@ exports.getCEODashboard = async (req, res) => {
         inProgress: ticketData.filter(t => t.status === "In Progress").length,
         resolved: ticketData.filter(t => t.status === "Resolved").length,
       },
-      // Grouping by Category (Fee, Infrastructure, Faculty, etc.)
       categoryBreakdown: ticketData.reduce((acc, t) => {
         const cat = t.category || 'Uncategorized';
         acc[cat] = (acc[cat] || 0) + 1;
         return acc;
       }, {}),
-      // Staff Performance Tracking
       assigneePerformance: ticketData.reduce((acc, t) => {
         if (t.assignee && t.assignee.username) {
           const name = t.assignee.username;
@@ -165,7 +162,7 @@ exports.getCEODashboard = async (req, res) => {
           return acc;
         }, {})
       },
-      support: supportStats // ✅ Deep tracking integrated
+      support: supportStats 
     };
 
     res.json(dashboardStats);
@@ -176,18 +173,16 @@ exports.getCEODashboard = async (req, res) => {
   }
 };
 
-// server/controllers/ceoDashboardController.js
-
 /**
  * @description Trend Chart API for Executive Intelligence
- * Returns daily aggregated metrics for charts.
  */
 exports.getCEOTrends = async (req, res) => {
-  if (req.user?.username !== "pushpam") {
-    return res.status(403).json({ error: "Access denied" });
+  // ✅ ROLE-BASED ACCESS CONTROL
+  if (!req.isSuperAdmin) {
+    return res.status(403).json({ error: "Access denied. Executive privileges required." });
   }
 
-  const { from, to, location, interval = 'day' } = req.query;
+  const { from, to, location } = req.query;
 
   try {
     let targetLocationId = null;
@@ -198,7 +193,6 @@ exports.getCEOTrends = async (req, res) => {
 
     const applyLoc = (query) => (targetLocationId ? query.eq('location_id', targetLocationId) : query);
 
-    // Fetch raw time-stamped data
     const [admissions, payments, tickets] = await Promise.all([
       applyLoc(supabase.from("admissions").select("created_at, joined"))
         .gte("created_at", from).lte("created_at", to),
@@ -210,7 +204,6 @@ exports.getCEOTrends = async (req, res) => {
         .gte("created_at", from).lte("created_at", to)
     ]);
 
-    // Helper: Create a Map of all dates in range to ensure no gaps in the chart
     const trendMap = {};
     let curr = new Date(from);
     const end = new Date(to);
@@ -227,7 +220,6 @@ exports.getCEOTrends = async (req, res) => {
       curr.setDate(curr.getDate() + 1);
     }
 
-    // 1. Map Admissions
     admissions.data?.forEach(a => {
       const date = a.created_at.split('T')[0];
       if (trendMap[date]) {
@@ -236,15 +228,13 @@ exports.getCEOTrends = async (req, res) => {
       }
     });
 
-    // 2. Map Revenue
     payments.data?.forEach(p => {
-      const date = p.payment_date; // Assuming YYYY-MM-DD
+      const date = p.payment_date; 
       if (trendMap[date]) {
         trendMap[date].revenue += Number(p.amount_paid || 0);
       }
     });
 
-    // 3. Map Tickets
     tickets.data?.forEach(t => {
       const date = t.created_at.split('T')[0];
       if (trendMap[date]) {
@@ -253,9 +243,7 @@ exports.getCEOTrends = async (req, res) => {
       }
     });
 
-    // Convert Map to sorted array for the frontend chart
     const trendData = Object.values(trendMap).sort((a, b) => new Date(a.date) - new Date(b.date));
-
     res.json(trendData);
   } catch (err) {
     res.status(500).json({ error: "Trend analysis failed." });

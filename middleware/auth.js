@@ -15,34 +15,31 @@ const auth = async (req, res, next) => {
     // ---------------------------------------------------------
     // 1. CHECK IF TOKEN BELONGS TO A STUDENT
     // ---------------------------------------------------------
-    // The 'role' comes from the TOKEN payload, not the database.
     if (decoded.role === 'student') {
       const { data: student, error } = await supabase
-        .from('students') // We look in the 'students' table
-        .select('*')      // We select whatever columns exist (id, name, etc.)
+        .from('students')
+        .select('*')
         .eq('id', decoded.id)
         .single();
 
       if (error || !student) {
         throw new Error('Student not found');
       }
-      // --- ADD THIS LINE ---
-      // Since the DB doesn't have it, we manually add it to the object
+
+      // Students are never super_admins
       student.role = 'student'; 
-      // ---------------------
+      
       req.user = student;
       req.userType = 'student';
+      req.isSuperAdmin = false; 
       req.locationId = student.location_id; 
       
-      return next(); // ✅ Success! Exit middleware here.
+      return next(); 
     }
 
     // ---------------------------------------------------------
-    // 2. CHECK IF TOKEN BELONGS TO FACULTY / ADMIN / STAFF
+    // 2. CHECK IF TOKEN BELONGS TO FACULTY / ADMIN / STAFF / SUPER_ADMIN
     // ---------------------------------------------------------
-    // (This runs only if the role is NOT 'student')
-    
-    // Admins/Staff usually have 'userId' in token, Faculty have 'id'
     const userId = decoded.role === 'faculty' ? decoded.id : (decoded.userId || decoded.id);
 
     let userQuery;
@@ -67,8 +64,18 @@ const auth = async (req, res, next) => {
       throw new Error('User not found');
     }
 
+    // Attach user to request
     req.user = user;
-    req.userType = decoded.role; // 'faculty', 'admin', etc.
+    
+    // ---------------------------------------------------------
+    // 3. ROLE-BASED ACCESS CONTROL (RBAC) INJECTION
+    // ---------------------------------------------------------
+    // We prioritize the role from the Database over the Token for security
+    req.userType = user.role || decoded.role; 
+    
+    // Set a global flag for 'super_admin' to bypass branch/location restrictions
+    req.isSuperAdmin = user.role === 'super_admin'; 
+    
     req.locationId = user.location_id; 
     
     next();

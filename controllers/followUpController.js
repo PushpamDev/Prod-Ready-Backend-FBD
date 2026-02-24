@@ -1,29 +1,28 @@
+// server/controllers/followUpController.js
 const supabase = require('../db');
 const { format } = require('date-fns');
 
 /**
  * @description Get the task list for the main follow-up dashboard.
- * [UPDATED] Added 'joined' filter to exclude dropouts and 'pushpam' override.
+ * [UPDATED] Replaced 'pushpam' check with 'isSuperAdmin' for global branch access.
  */
 exports.getFollowUpTasks = async (req, res) => {
   const { dateFilter, searchTerm, batchName, assignedTo, dueAmountMin, startDate, endDate } = req.query;
   const locationId = req.locationId;
-  const isPushpam = req.user?.username === 'pushpam';
+  const isSuperAdmin = req.isSuperAdmin; // ✅ From updated auth middleware
 
   try {
     const today = format(new Date(), 'yyyy-MM-dd');
 
     const buildBaseFilters = (q) => {
-      // ✅ Security: Only filter by location if NOT pushpam
-      if (!isPushpam) {
+      // ✅ ROLE-BASED SECURITY: Bypass location filter if user is super_admin
+      if (!isSuperAdmin) {
         if (!locationId) throw new Error('LOCATION_REQUIRED');
         q = q.eq('location_id', locationId);
       }
       
-      // ✅ DROPOUT FIX: Strictly only show students who are still joined
-      // This removes dropouts from the follow-up dashboard automatically.
+      // Strictly only show students who are still joined (exclude dropouts)
       q = q.eq('joined', true);
-      
       q = q.gt('total_due_amount', 0);
       
       if (searchTerm) {
@@ -35,7 +34,7 @@ exports.getFollowUpTasks = async (req, res) => {
       return q;
     };
 
-    // 1-3. Fetch Counts (Now excluding dropouts via buildBaseFilters)
+    // 1-3. Fetch Counts
     const [todayRes, overdueRes, upcomingRes] = await Promise.all([
       buildBaseFilters(supabase.from('v_follow_up_task_list').select('*', { count: 'exact', head: true }))
         .eq('next_task_due_date', today)
@@ -82,22 +81,23 @@ exports.getFollowUpTasks = async (req, res) => {
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
+
 /**
  * @description Create a follow-up log.
- * [FIXED] Robust branch validation with student-table fallback for 'null' locations.
+ * [UPDATED] Replaced 'pushpam' check with 'isSuperAdmin' gate.
  */
 exports.createFollowUpLog = async (req, res) => {
   const { admission_id, notes, next_follow_up_date, type, lead_type } = req.body;
   const user_id = req.user?.id;
-  const username = req.user?.username;
   const locationId = req.locationId;
+  const isSuperAdmin = req.isSuperAdmin; // ✅ From updated auth middleware
 
   if (!admission_id || !user_id) {
     return res.status(400).json({ error: 'admission_id and user_id are required.' });
   }
 
   try {
-    // 1. Fetch the admission AND the linked student's location as a fallback
+    // 1. Fetch the admission AND the linked student's location
     const { data: admission, error: fetchErr } = await supabase
       .from('admissions')
       .select(`
@@ -112,15 +112,13 @@ exports.createFollowUpLog = async (req, res) => {
       return res.status(404).json({ error: `Admission record [${admission_id}] not found.` });
     }
 
-    // 2. Resolve the actual location (Use admission col, fallback to student table)
+    // 2. Resolve the actual location
     const studentLocation = admission.location_id || (admission.students && admission.students.location_id);
 
-    // 3. Security Gate
-    const isPushpam = username === 'pushpam';
-    // Ensure we compare numbers to numbers
+    // 3. ✅ SECURITY GATE: Same branch check, bypassed for super_admin
     const isSameBranch = studentLocation && locationId && (Number(studentLocation) === Number(locationId));
 
-    if (!isPushpam && !isSameBranch) {
+    if (!isSuperAdmin && !isSameBranch) {
       return res.status(403).json({ 
         error: `Access Denied. Branch mismatch (Student Branch: ${studentLocation || 'Unknown'}, Your Branch: ${locationId})` 
       });
@@ -155,6 +153,7 @@ exports.createFollowUpLog = async (req, res) => {
     res.status(500).json({ error: error.message || 'Internal server error.' });
   }
 };
+
 /**
  * @description Fetch history for a specific admission.
  */

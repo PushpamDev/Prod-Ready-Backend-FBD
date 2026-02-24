@@ -1,12 +1,16 @@
+// server/controllers/batchAllotmentController.js
+
 const supabase = require('../db');
 
 /* ===========================================================
-   GET BATCH ALLOTMENT LIST (MULTI-BATCH SAFE)
+   GET BATCH ALLOTMENT LIST (MULTI-BRANCH & ROLE SAFE)
    =========================================================== */
 
 exports.getBatchAllotmentList = async (req, res) => {
+  const locationId = req.locationId;
+  const isSuperAdmin = req.isSuperAdmin; // ✅ From updated auth middleware
+
   try {
-    // ✅ CAPTURE SEARCH FROM QUERY PARAMS
     const { search = '' } = req.query;
 
     /* -------------------- 1️⃣ Base admission data -------------------- */
@@ -19,10 +23,16 @@ exports.getBatchAllotmentList = async (req, res) => {
         student_name,
         student_phone_number,
         courses_str,
-        date_of_admission
+        date_of_admission,
+        location_id
       `);
 
-    // ✅ APPLY SEARCH FILTER ON DATABASE LEVEL
+    // ✅ ROLE-BASED FILTER: Only apply location restriction if NOT super_admin
+    if (!isSuperAdmin) {
+      if (!locationId) return res.status(401).json({ error: 'Location context missing.' });
+      query = query.eq('location_id', locationId);
+    }
+
     if (search) {
       query = query.or(`student_name.ilike.%${search}%,admission_number.ilike.%${search}%,student_phone_number.ilike.%${search}%`);
     }
@@ -88,11 +98,25 @@ exports.getBatchAllotmentList = async (req, res) => {
 exports.updateBatchAllotment = async (req, res) => {
   const { admissionId } = req.params;
   const { joined, joining_date, remarks } = req.body;
+  const isSuperAdmin = req.isSuperAdmin;
+  const locationId = req.locationId;
   
-  // ✅ Switch to username for better readability and to avoid FK errors
-  const staffIdentifier = req.user?.username || req.user?.id || 'System'; 
+  const staffIdentifier = req.user?.username || 'System'; 
 
   try {
+    // ✅ SECURITY CHECK: Ensure the user belongs to the same branch or is super_admin
+    const { data: targetAdmission, error: checkErr } = await supabase
+      .from('admissions')
+      .select('location_id')
+      .eq('id', admissionId)
+      .single();
+
+    if (checkErr || !targetAdmission) return res.status(404).json({ error: "Admission not found." });
+
+    if (!isSuperAdmin && Number(targetAdmission.location_id) !== Number(locationId)) {
+      return res.status(403).json({ error: "Unauthorized: You can only update students in your own branch." });
+    }
+
     // 1. Update main admission
     const { error: admissionErr } = await supabase
       .from('admissions')
@@ -107,17 +131,13 @@ exports.updateBatchAllotment = async (req, res) => {
 
     // 2. Log History
     if (remarks && remarks.trim() !== "") {
-      const { error: historyErr } = await supabase
+      await supabase
         .from('admission_remarks')
         .insert({
             admission_id: admissionId,
             remark_text: remarks,
-            created_by: staffIdentifier // Now saving 'pushpam' or 'admin' instead of a UUID
+            created_by: staffIdentifier 
         });
-      
-      if (historyErr) {
-        console.error("Remark History Log Failed:", historyErr);
-      }
     }
 
     res.json({ success: true });

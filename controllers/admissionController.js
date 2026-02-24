@@ -4,20 +4,24 @@ const supabase = require('../db');
 
 /**
  * @description
- * Get Admission Dashboard rows filtered by Location.
+ * Get Admission Dashboard rows. 
+ * Super Admins see all branches; standard Admins are filtered by locationId.
  */
 exports.getAllAdmissions = async (req, res) => {
-  const locationId = req.locationId; // From auth middleware
+  const locationId = req.locationId;
+  const isSuperAdmin = req.isSuperAdmin; // From updated auth middleware
 
   try {
     const searchTerm = req.query.search || '';
 
     /* ----------------------- 1. FETCH ROW DATA ----------------------- */
-    // We use the View we fixed earlier because it's already location-indexed
-    let query = supabase
-      .from('v_admission_financial_summary')
-      .select('*')
-      .eq('location_id', locationId); // CRITICAL: Security Filter
+    let query = supabase.from('v_admission_financial_summary').select('*');
+
+    // ✅ ROLE-BASED FILTER: Only apply location restriction if NOT super_admin
+    if (!isSuperAdmin) {
+      if (!locationId) return res.status(401).json({ error: 'Location context missing.' });
+      query = query.eq('location_id', locationId);
+    }
 
     if (searchTerm) {
       query = query.or(`student_name.ilike.%${searchTerm}%,student_phone_number.ilike.%${searchTerm}%,admission_number.ilike.%${searchTerm}%`);
@@ -51,7 +55,6 @@ exports.getAllAdmissions = async (req, res) => {
         revenueCollectedThisMonth += Number(r.total_paid || 0);
       }
 
-      // Check for overdue via the status column in your summary view
       if (r.status === 'Pending' && new Date(r.next_task_due_date) < now) {
         overdueCount += 1;
       }
@@ -79,9 +82,11 @@ exports.getAllAdmissions = async (req, res) => {
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
+
 /**
  * @description
- * Get a single admission with all related details
+ * Get a single admission with all related details.
+ * Standard admins are restricted to their branch; Super Admins have global access.
  */
 exports.getAdmissionById = async (req, res) => {
   const { id } = req.params;
@@ -98,6 +103,11 @@ exports.getAdmissionById = async (req, res) => {
       return res.status(404).json({ error: 'Admission not found' });
     }
 
+    // ✅ SECURITY GATE: Prevent branch-hopping unless super_admin
+    if (!req.isSuperAdmin && Number(admission.location_id) !== Number(req.locationId)) {
+      return res.status(403).json({ error: "Access denied. You do not have permission to view this branch's data." });
+    }
+
     const { data: coursesData, error: coursesError } = await supabase
       .from('admission_courses')
       .select('courses(*)')
@@ -105,9 +115,7 @@ exports.getAdmissionById = async (req, res) => {
 
     if (coursesError) throw coursesError;
 
-    const courses = coursesData
-      ? coursesData.map((item) => item.courses)
-      : [];
+    const courses = coursesData ? coursesData.map((item) => item.courses) : [];
 
     const { data: installments, error: installmentsError } = await supabase
       .from('v_installment_status')
@@ -118,79 +126,40 @@ exports.getAdmissionById = async (req, res) => {
     if (installmentsError) throw installmentsError;
 
     res.status(200).json({
-      ...admission,              // includes undertaking_status automatically
+      ...admission,
       courses,
       installments: installments || [],
     });
   } catch (error) {
     console.error(`Error fetching admission ${id}:`, error);
-
-    if (error.code === 'PGRST116') {
-      return res.status(404).json({ error: 'Admission not found' });
-    }
-
+    if (error.code === 'PGRST116') return res.status(404).json({ error: 'Admission not found' });
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
 
 /**
  * @description
- * Create a new admission using RPC.
- * Updated to record the staff member (user) who processed the admission.
+ * Create a new admission.
  */
 exports.createAdmission = async (req, res) => {
   const {
-    student_name,
-    student_phone_number,
-    father_name,
-    father_phone_number,
-    permanent_address,
-    current_address,
-    identification_type,
-    identification_number,
-    date_of_admission,
-    course_start_date,
-    batch_preference,
-    remarks,
-    certificate_id,
-    discount,
-    course_ids,
-    installments,
-    source_intake_id,
+    student_name, student_phone_number, father_name, father_phone_number,
+    permanent_address, current_address, identification_type, identification_number,
+    date_of_admission, course_start_date, batch_preference, remarks,
+    certificate_id, discount, course_ids, installments, source_intake_id,
   } = req.body;
 
   const locationId = req.locationId;
-  const userId = req.user?.id; // Capture the ID of the logged-in staff member
+  const userId = req.user?.id;
 
-  /* ---------------------------- VALIDATION ---------------------------- */
   if (!locationId || !userId) {
-    return res.status(401).json({
-      error: 'Authentication failed: User identity or Branch Location missing.',
-    });
+    return res.status(401).json({ error: 'Authentication failed.' });
   }
 
-  // Basic Required Fields
   if (!student_name || !student_phone_number || !date_of_admission) {
-    return res.status(400).json({
-      error: 'Student Name, Phone Number, and Admission Date are required.',
-    });
+    return res.status(400).json({ error: 'Required fields missing.' });
   }
 
-  // Course Validation
-  if (!Array.isArray(course_ids) || course_ids.length === 0) {
-    return res.status(400).json({
-      error: 'At least one course must be selected.',
-    });
-  }
-
-  // Installment Validation
-  if (!Array.isArray(installments) || installments.length === 0) {
-    return res.status(400).json({
-      error: 'Installment schedule is required for financial tracking.',
-    });
-  }
-
-  /* ----------------------------- RPC CALL ----------------------------- */
   try {
     const { data, error } = await supabase.rpc(
       'create_admission_and_student',
@@ -212,44 +181,30 @@ exports.createAdmission = async (req, res) => {
         p_course_ids: course_ids,
         p_installments: installments, 
         p_location_id: locationId,
-        p_admitted_by: userId, // <--- New parameter passed to the updated RPC
+        p_admitted_by: userId,
         p_source_intake_id: source_intake_id || null, 
       }
     );
 
     if (error) throw error;
 
-    res.status(201).json({
-      message: 'Admission created successfully',
-      admission_id: data,
-    });
+    res.status(201).json({ message: 'Admission created successfully', admission_id: data });
   } catch (error) {
-    console.error('Error creating admission:', error);
-
-    if (error.code === '42883') {
-      return res.status(500).json({
-        error: 'Database function signature mismatch. Ensure you updated the RPC function to include p_admitted_by.',
-      });
-    }
-
-    res.status(500).json({
-      error: error.message || 'Error creating admission.',
-    });
+    res.status(500).json({ error: error.message || 'Error creating admission.' });
   }
 };
+
 /**
  * @description
  * Update an existing admission.
- * STRICT SECURITY: Only user 'pushpam' can proceed.
- * This function uses the 'update_admission_full' RPC to sync students, 
- * admissions, courses, and installments in a single transaction.
+ * STRICT SECURITY: Only roles with 'super_admin' can proceed.
  */
 exports.updateAdmission = async (req, res) => {
   const { id } = req.params;
   
-  // Security Gate
-  if (req.user?.username !== 'pushpam') {
-    return res.status(403).json({ error: "Access denied." });
+  // ✅ ROLE-BASED SECURITY GATE
+  if (!req.isSuperAdmin) {
+    return res.status(403).json({ error: "Access denied. Super Admin privileges required to update admissions." });
   }
 
   const {
@@ -259,17 +214,14 @@ exports.updateAdmission = async (req, res) => {
     certificate_id, discount, course_ids, installments
   } = req.body;
 
-  // locationId is likely 1, 2, or 3
   const locationId = req.locationId; 
   const userId = req.user?.id;
 
   try {
-    // ✅ FIX: Ensure locationId is treated as a string for the RPC, 
-    // but don't force it to null if it's a short ID (integer).
     const finalLocationId = locationId ? String(locationId) : null;
 
     if (!finalLocationId) {
-       return res.status(400).json({ error: "Location identification is missing. Please re-login." });
+       return res.status(400).json({ error: "Location identification is missing." });
     }
 
     const { error } = await supabase.rpc('update_admission_full', {
@@ -303,78 +255,67 @@ exports.updateAdmission = async (req, res) => {
   }
 };
 
+/**
+ * @description
+ * Mark a student as a Dropout.
+ * STRICT SECURITY: Only roles with 'super_admin' can proceed.
+ */
+exports.markStudentDropout = async (req, res) => {
+  const { id } = req.params;
+  const { dropout_reason } = req.body;
+  const userId = req.user?.id;
+
+  if (!id || id === 'undefined' || id.length < 30) {
+    return res.status(400).json({ error: "Invalid Admission ID." });
+  }
+
+  // ✅ ROLE-BASED SECURITY GATE
+  if (!req.isSuperAdmin) {
+    return res.status(403).json({ error: "Access denied. Super Admin privileges required to process dropouts." });
+  }
+
+  try {
+    const { error: updateError } = await supabase
+      .from('admissions')
+      .update({ 
+        joined: false, 
+        remarks: `DROPOUT: ${dropout_reason}` 
+      })
+      .eq('id', id);
+
+    if (updateError) throw updateError;
+
+    await supabase.from('admission_remarks').insert([{
+      admission_id: id,
+      remark_text: `MARKED AS DROPOUT. Reason: ${dropout_reason}`,
+      created_by: userId
+    }]);
+
+    res.status(200).json({ message: 'Dropout processed.' });
+  } catch (error) {
+    console.error('Dropout Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 exports.checkAdmissionByPhone = async (req, res) => {
   try {
     const { phone } = req.params;
-
     const { data, error } = await supabase
       .from('admissions')
       .select('id, undertaking_completed')
       .eq('student_phone_number', phone)
       .maybeSingle();
 
-    if (error) {
-      console.error('Check Admission Error:', error);
-      return res.status(500).json({ error: 'Lookup failed' });
-    }
-
-    if (!data) {
-      return res.json({ mode: 'INTAKE' });
-    }
+    if (error) return res.status(500).json({ error: 'Lookup failed' });
+    if (!data) return res.json({ mode: 'INTAKE' });
 
     return res.json({
       mode: 'ADMISSION',
       admission_id: data.id,
       undertaking_completed: data.undertaking_completed,
     });
-
   } catch (err) {
-    console.error('Check Admission Exception:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
-
-  /**
-   * @description
-   * Mark a student as a Dropout.
-   * This sets 'joined' to false and adds a dropout reason to remarks.
-   * Dropouts are excluded from follow-up tasks and active counts.
-   */
-  exports.markStudentDropout = async (req, res) => {
-    const { id } = req.params;
-    const { dropout_reason } = req.body;
-    const userId = req.user?.id;
-
-    // ✅ CRITICAL FIX: Explicitly check for 'undefined' as a string
-    if (!id || id === 'undefined' || id.length < 30) {
-      return res.status(400).json({ error: "Invalid Admission ID. Check if the ID is being passed from the frontend." });
-    }
-
-    if (req.user?.username !== 'pushpam') {
-      return res.status(403).json({ error: "Access denied." });
-    }
-
-    try {
-      const { error: updateError } = await supabase
-        .from('admissions')
-        .update({ 
-          joined: false, //
-          remarks: `DROPOUT: ${dropout_reason}` 
-        })
-        .eq('id', id);
-
-      if (updateError) throw updateError;
-
-      // Add to Remark History
-      await supabase.from('admission_remarks').insert([{
-        admission_id: id,
-        remark_text: `MARKED AS DROPOUT. Reason: ${dropout_reason}`,
-        created_by: userId
-      }]);
-
-      res.status(200).json({ message: 'Dropout processed.' });
-    } catch (error) {
-      console.error('Dropout Error:', error);
-      res.status(500).json({ error: error.message });
-    }
-  };

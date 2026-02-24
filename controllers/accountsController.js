@@ -3,20 +3,20 @@ const supabase = require('../db');
 
 /**
  * @description Get admissions list for the approval page or general accounts view.
- * Scoped by location_id with a global override for 'pushpam'.
+ * Scoped by location_id with a global override for roles with 'super_admin'.
  */
 exports.getAdmissionsForAccounts = async (req, res) => {
   const { status = 'Approved', search = '' } = req.query; 
   const locationId = req.locationId;
-  const isPushpam = req.user?.username === 'pushpam';
+  const isSuperAdmin = req.isSuperAdmin; // ✅ Updated logic
 
   try {
     let query = supabase
       .from('v_admission_financial_summary') 
       .select('admission_number, admission_id, student_name, student_phone_number, created_at, total_payable_amount, total_paid, remaining_due, approval_status, status, base_amount, location_id');
 
-    // ✅ Branch Security: Apply location filter unless user is Pushpam
-    if (!isPushpam) {
+    // ✅ Branch Security: Apply location filter unless user is a super_admin
+    if (!isSuperAdmin) {
       if (!locationId) return res.status(401).json({ error: 'Location context missing.' });
       query = query.eq('location_id', locationId);
     }
@@ -171,8 +171,8 @@ const numToWords = (n) => {
 exports.recordPayment = async (req, res) => {
   const { admission_id, amount_paid, payment_date, method, notes } = req.body;
   const user_id = req.user?.id;
-  const locationId = req.locationId; // Extracted from middleware
-  const username = req.user?.username;
+  const locationId = req.locationId; 
+  const isSuperAdmin = req.isSuperAdmin; // ✅ Updated logic
 
   if (!admission_id || !amount_paid || !payment_date || !method || !user_id) {
     return res.status(400).json({ error: 'Missing required fields.' });
@@ -188,8 +188,8 @@ exports.recordPayment = async (req, res) => {
 
     if (admError || !adm) return res.status(404).json({ error: 'Admission not found.' });
 
-    // ✅ Security: Pushpam override for global branch access
-    if (username !== 'pushpam' && Number(adm.location_id) !== Number(locationId)) {
+    // ✅ Security: Super Admin override for global branch access
+    if (!isSuperAdmin && Number(adm.location_id) !== Number(locationId)) {
       return res.status(403).json({ error: 'Unauthorized: Cannot record payment for another branch.' });
     }
 
@@ -214,7 +214,6 @@ exports.recordPayment = async (req, res) => {
     if (paymentError) throw paymentError;
 
     // 4. Trigger FIFO Installment Balancing
-    // This RPC handles the 'Paid' status logic on the backend
     const { error: rpcError } = await supabase.rpc('apply_payment_to_installments', { 
       p_payment_id: paymentData.id 
     });
@@ -242,14 +241,14 @@ exports.recordPayment = async (req, res) => {
     res.status(500).json({ error: 'An error occurred while recording the payment.' });
   }
 };
+
 /**
  * @description Get details for the Accounts detail page.
- * [RESOLVED] Fixed path duplication and correctly parsing identification_files JSONB.
  */
 exports.getAccountDetails = async (req, res) => {
   const { admissionId } = req.params;
   const locationId = req.locationId; 
-  const isPushpam = req.user?.username === 'pushpam';
+  const isSuperAdmin = req.isSuperAdmin; // ✅ Updated logic
 
   if (!admissionId || admissionId === 'undefined') {
     return res.status(400).json({ error: 'Invalid Admission ID.' });
@@ -273,64 +272,44 @@ exports.getAccountDetails = async (req, res) => {
     if (admissionResult.error) throw admissionResult.error;
     const admission = admissionResult.data;
 
-    if (!isPushpam && Number(admission.location_id) !== Number(locationId)) {
+    // ✅ Security: Bypass location mismatch for super_admin
+    if (!isSuperAdmin && Number(admission.location_id) !== Number(locationId)) {
       return res.status(403).json({ error: 'Access denied: Branch mismatch.' });
     }
 
-    // --- NEW DOCUMENT PATH EXTRACTION LOGIC ---
+    // --- DOCUMENT PATH EXTRACTION LOGIC ---
     let idCardUrls = [];
-    
-    // Extracting from identification_files (Your new record format)
     const intakeFiles = intakeResult.data?.identification_files || [];
     const undertakingFiles = admission.undertaking_files || [];
     const combinedFiles = [...(Array.isArray(intakeFiles) ? intakeFiles : []), ...(Array.isArray(undertakingFiles) ? undertakingFiles : [])];
 
     if (combinedFiles.length > 0) {
       idCardUrls = combinedFiles.map(fileObj => {
-        // ✅ CRITICAL FIX: Your records store the full path in 'path' property
-        // Example: "intakes/019fdb4e.../f114bc69..._IMG_7108.jpeg"
         let storagePath = "";
-        
         if (typeof fileObj === 'object' && fileObj !== null) {
-          // Use the 'path' property if it exists, otherwise fall back to 'file_name'
           storagePath = fileObj.path || `intakes/${admissionId}/${fileObj.file_name}`;
         } else {
           storagePath = `intakes/${admissionId}/${fileObj}`;
         }
-
-        // Safety check to ensure we don't return broken URLs
         if (!storagePath || storagePath.includes('[object Object]')) return null;
 
-        const { data } = supabase.storage
-          .from('identification')
-          .getPublicUrl(storagePath);
-        
+        const { data } = supabase.storage.from('identification').getPublicUrl(storagePath);
         return data.publicUrl;
       }).filter(Boolean);
     }
 
     // --- FALLBACK: Physical Folder Scan ---
     if (idCardUrls.length === 0) {
-      const { data: storageFiles } = await supabase.storage
-        .from('identification')
-        .list(`intakes/${admissionId}`);
-      
+      const { data: storageFiles } = await supabase.storage.from('identification').list(`intakes/${admissionId}`);
       if (storageFiles && storageFiles.length > 0) {
-        idCardUrls = storageFiles
-          .filter(f => f.name !== '.emptyFolderPlaceholder')
-          .map(f => {
-            const { data } = supabase.storage
-              .from('identification')
-              .getPublicUrl(`intakes/${admissionId}/${f.name}`);
-            return data.publicUrl;
-          });
+        idCardUrls = storageFiles.filter(f => f.name !== '.emptyFolderPlaceholder').map(f => {
+          const { data } = supabase.storage.from('identification').getPublicUrl(`intakes/${admissionId}/${f.name}`);
+          return data.publicUrl;
+        });
       }
     }
 
-    // Branch Mapping
     const branchMap = { 1: "Faridabad", 2: "Pune", 3: "Ahmedabad" };
-    
-    // Staff Map for Payments
     const staffIds = [...new Set((paymentsResult.data || []).map(p => p.created_by).filter(Boolean))];
     const { data: userData } = await supabase.from('users').select('id, username').in('id', staffIds);
     const staffMap = {};
@@ -358,22 +337,21 @@ exports.getAccountDetails = async (req, res) => {
       installments: (installmentsResult.data || []).map(i => ({ id: i.id, due_date: i.due_date, amount: i.amount_due, status: i.status })),
       payments: paymentsWithStaff,
       courses: (coursesResult.data || []).map(c => c.courses?.name).filter(Boolean),
-      documents: [...new Set(idCardUrls)] // Deduplicate URLs
+      documents: [...new Set(idCardUrls)]
     });
-
   } catch (error) {
     console.error(`Error fetching account details:`, error);
     res.status(500).json({ error: 'An unexpected server error occurred.' });
   }
 };
+
 /**
  * @description Get comprehensive data for receipt generation.
- * Restored to include full student profile and financial breakdown.
  */
 exports.getReceiptData = async (req, res) => {
   const { paymentId } = req.params;
   const locationId = req.locationId; 
-  const isPushpam = req.user?.username === 'pushpam';
+  const isSuperAdmin = req.isSuperAdmin; // ✅ Updated logic
 
   if (!paymentId) return res.status(400).json({ error: 'Payment ID is required.' });
 
@@ -383,20 +361,9 @@ exports.getReceiptData = async (req, res) => {
       .select(`
         *,
         admissions!payments_admission_id_fkey (
-          id, 
-          date_of_admission, 
-          gst_rate, 
-          is_gst_exempt, 
-          total_payable_amount,
-          father_name, 
-          current_address, 
-          location_id,
-          students ( 
-            name, 
-            phone_number, 
-            admission_number,
-            batch_students ( batches ( name ) )
-          ),
+          id, date_of_admission, gst_rate, is_gst_exempt, total_payable_amount,
+          father_name, current_address, location_id,
+          students ( name, phone_number, admission_number, batch_students ( batches ( name ) ) ),
           admission_courses ( courses ( name, price ) ),
           installments!installments_admission_id_fkey ( id, due_date, amount, status )
         )
@@ -405,32 +372,23 @@ exports.getReceiptData = async (req, res) => {
       .maybeSingle();
 
     if (payError || !payment || !payment.admissions) {
-      console.error("Receipt Query Error:", payError);
       return res.status(404).json({ error: 'Payment or associated admission not found.' });
     }
 
     const admissionData = payment.admissions;
     const studentData = admissionData.students;
 
-    // --- BRANCH SECURITY GATE ---
-    if (!isPushpam && Number(admissionData.location_id) !== Number(locationId)) {
+    // ✅ Branch Security: Super admin bypass
+    if (!isSuperAdmin && Number(admissionData.location_id) !== Number(locationId)) {
       return res.status(403).json({ error: 'Access denied: Branch mismatch.' });
     }
 
-    // --- AGGREGATION & LOGIC ---
-    
-    // 1. Prediction Logic (Next Pending Installment)
     const nextInst = (admissionData.installments || [])
       .filter(i => i.status !== 'Paid')
       .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime())[0];
 
-    // 2. Batch Formatting
-    const batchString = studentData?.batch_students
-      ?.map(bs => bs.batches?.name)
-      .filter(Boolean)
-      .join(', ') || 'Not Allotted';
+    const batchString = studentData?.batch_students?.map(bs => bs.batches?.name).filter(Boolean).join(', ') || 'Not Allotted';
 
-    // 3. GST & Taxable Amount Calculation
     let gstBreakdown = { cgst: 0, sgst: 0, totalGst: 0, rate: admissionData.gst_rate || 0 };
     let taxableAmount = Number(payment.amount_paid);
     
@@ -438,15 +396,9 @@ exports.getReceiptData = async (req, res) => {
       const rateMultiplier = admissionData.gst_rate / 100;
       taxableAmount = payment.amount_paid / (1 + rateMultiplier);
       const totalGst = payment.amount_paid - taxableAmount;
-      gstBreakdown = { 
-        cgst: totalGst / 2, 
-        sgst: totalGst / 2, 
-        totalGst, 
-        rate: admissionData.gst_rate 
-      };
+      gstBreakdown = { cgst: totalGst / 2, sgst: totalGst / 2, totalGst, rate: admissionData.gst_rate };
     }
 
-    // --- FINAL RESPONSE MAPPING ---
     const receiptData = {
       receipt_number: payment.receipt_number,
       payment_date: payment.payment_date,
@@ -466,8 +418,6 @@ exports.getReceiptData = async (req, res) => {
       taxable_amount: taxableAmount.toFixed(2),
       gst_summary: gstBreakdown,
       total_payable_admission: admissionData.total_payable_amount,
-      
-      // Prediction object retained for future-proofing
       prediction: {
         next_due_date: nextInst ? nextInst.due_date : null,
         next_due_amount: nextInst ? nextInst.amount : 0,
@@ -478,6 +428,6 @@ exports.getReceiptData = async (req, res) => {
     res.status(200).json(receiptData);
   } catch (error) {
     console.error(`Error fetching receipt data:`, error);
-    res.status(500).json({ error: 'Server error occurred.', details: error.message });
+    res.status(500).json({ error: 'Server error occurred.' });
   }
 };
