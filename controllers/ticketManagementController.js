@@ -57,10 +57,11 @@ const createTicket = async (req, res) => {
   }
 };
 
-// --- GET ALL TICKETS ---
+// --- GET ALL TICKETS (REVISED BRANCH-WIDE LOGIC) ---
 const getAllTickets = async (req, res) => {
   const isSuperAdmin = req.isSuperAdmin; 
 
+  // Super Admin bypasses location check; all others must have a location context
   if (!isSuperAdmin && !req.locationId) {
     return res.status(401).json({ error: 'Authentication required with location.' });
   }
@@ -72,7 +73,7 @@ const getAllTickets = async (req, res) => {
     const userRole = req.user.role; 
 
     // 1. Initialize Base Queries
-    let countQuery = supabase.from('tickets').select('status, assignee_id, student_id, created_at', { count: 'exact' });
+    let countQuery = supabase.from('tickets').select('status, assignee_id, student_id, created_at, location_id');
     let mainQuery = supabase
       .from('tickets')
       .select(`
@@ -84,35 +85,34 @@ const getAllTickets = async (req, res) => {
         location_id
       `, { count: 'exact' });
 
-    // 2. Apply Location Filter (Skip for Super Admin viewing global queue)
+    // 2. Apply Location Filter (Skip for Super Admin to allow global view)
     if (!isSuperAdmin) {
       countQuery = countQuery.eq('location_id', req.locationId);
       mainQuery = mainQuery.eq('location_id', req.locationId);
     }
 
-    // 3. Apply Role Filters
+    // 3. Apply Role-Based Filtering
     if (userRole === 'student') {
+      // Students remain restricted to their own submissions
       countQuery = countQuery.eq('student_id', userId);
       mainQuery = mainQuery.eq('student_id', userId);
-    } else if (userRole === 'admin' && !isSuperAdmin) {
-      countQuery = countQuery.eq('assignee_id', userId);
-      mainQuery = mainQuery.eq('assignee_id', userId);
-    }
+    } 
+    // NOTE: Removed the 'admin' specific assignee_id filter.
+    // Standard admins now see all tickets within the location set in Step 2.
 
-    // 4. Apply Date Range Filters
+    // 4. Apply Date Range Filters (From/To)
     if (from) {
       countQuery = countQuery.gte('created_at', from);
       mainQuery = mainQuery.gte('created_at', from);
     }
     if (to) {
-      // Set to end of day to include tickets created on the 'to' date
       const toDate = new Date(to);
       toDate.setHours(23, 59, 59, 999);
       countQuery = countQuery.lte('created_at', toDate.toISOString());
       mainQuery = mainQuery.lte('created_at', toDate.toISOString());
     }
 
-    // 5. Fetch Counts based on filtering
+    // 5. Fetch Aggregate Counts for UI Dropdowns
     const { data: countData, error: countError } = await countQuery;
     if (countError) throw countError;
 
@@ -130,13 +130,14 @@ const getAllTickets = async (req, res) => {
       mainQuery = mainQuery.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
     }
 
-    // 7. Final Execution
+    // 7. Execute Main Paginated Query
     const { data: tickets, error, count } = await mainQuery
       .order('created_at', { ascending: false })
       .range(offset, offset + limit - 1);
 
     if (error) return handleSupabaseError(res, error, 'fetching tickets');
 
+    // Transform count for frontend display
     const transformedTickets = tickets.map(ticket => ({
       ...ticket,
       student_ticket_count: ticket.student?.student_ticket_count?.[0]?.count || 0
@@ -151,7 +152,7 @@ const getAllTickets = async (req, res) => {
     });
 
   } catch (error) {
-     console.error("Server error getting tickets:", error);
+     console.error("Internal server error while getting tickets:", error);
      res.status(500).json({ error: "Internal server error" });
   }
 };
