@@ -57,17 +57,18 @@ const createTicket = async (req, res) => {
   }
 };
 
-// --- GET ALL TICKETS (REVISED BRANCH-WIDE LOGIC) ---
+// --- GET ALL TICKETS (REVISED FOR SUPER ADMIN CITY FILTERING) ---
 const getAllTickets = async (req, res) => {
   const isSuperAdmin = req.isSuperAdmin; 
 
-  // Super Admin bypasses location check; all others must have a location context
+  // Super Admin bypasses mandatory location check; all others must have req.locationId
   if (!isSuperAdmin && !req.locationId) {
     return res.status(401).json({ error: 'Authentication required with location.' });
   }
 
   try {
-    const { status, search, category, page = 1, limit = 15, from, to } = req.query;
+    // ✅ Destructure location_id from query for Super Admin filtering
+    const { status, search, category, page = 1, limit = 15, from, to, location_id } = req.query;
     const offset = (page - 1) * limit;
     const userId = req.user.id;
     const userRole = req.user.role; 
@@ -85,20 +86,24 @@ const getAllTickets = async (req, res) => {
         location_id
       `, { count: 'exact' });
 
-    // 2. Apply Location Filter (Skip for Super Admin to allow global view)
-    if (!isSuperAdmin) {
+    // 2. ✅ APPLY LOCATION LOGIC
+    if (isSuperAdmin) {
+      // If Super Admin provided a specific city filter, use it. Otherwise, show all cities.
+      if (location_id && location_id !== 'All') {
+        countQuery = countQuery.eq('location_id', location_id);
+        mainQuery = mainQuery.eq('location_id', location_id);
+      }
+    } else {
+      // Standard Admins are strictly locked to their branch
       countQuery = countQuery.eq('location_id', req.locationId);
       mainQuery = mainQuery.eq('location_id', req.locationId);
     }
 
     // 3. Apply Role-Based Filtering
     if (userRole === 'student') {
-      // Students remain restricted to their own submissions
       countQuery = countQuery.eq('student_id', userId);
       mainQuery = mainQuery.eq('student_id', userId);
     } 
-    // NOTE: Removed the 'admin' specific assignee_id filter.
-    // Standard admins now see all tickets within the location set in Step 2.
 
     // 4. Apply Date Range Filters (From/To)
     if (from) {
@@ -137,7 +142,6 @@ const getAllTickets = async (req, res) => {
 
     if (error) return handleSupabaseError(res, error, 'fetching tickets');
 
-    // Transform count for frontend display
     const transformedTickets = tickets.map(ticket => ({
       ...ticket,
       student_ticket_count: ticket.student?.student_ticket_count?.[0]?.count || 0
@@ -179,27 +183,34 @@ const getTicketById = async (req, res) => {
 };
 
 // --- UPDATE TICKET ---
+// --- UPDATE TICKET (SUPER ADMIN ONLY RE-ASSIGNMENT) ---
 const updateTicket = async (req, res) => {
   const { id } = req.params;
   const { assignee_id, status, priority } = req.body;
-  const isSuperAdmin = req.isSuperAdmin; // ✅ Replaced hardcoded check
-  
-  const updatePayload = {};
-  if (status) updatePayload.status = status;
-  if (priority) updatePayload.priority = priority;
-  if (assignee_id !== undefined) updatePayload.assignee_id = assignee_id;
+  const isSuperAdmin = req.isSuperAdmin;
   
   try {
-    if (assignee_id) {
-      const { data: currentTicket } = await supabase.from('tickets').select('assignee_id').eq('id', id).single();
-      
-      // ✅ BLOCK REASSIGNMENT: If already assigned and user is not super_admin
-      if (currentTicket.assignee_id && !isSuperAdmin) {
-        return res.status(403).json({ error: "Forbidden: Only a Super Admin can reassign tickets already in progress." });
-      }
+    const { data: currentTicket, error: fetchErr } = await supabase
+        .from('tickets')
+        .select('assignee_id, title')
+        .eq('id', id)
+        .single();
+
+    if (fetchErr) return handleSupabaseError(res, fetchErr, 'finding ticket');
+
+    const updatePayload = { updated_at: new Date().toISOString() };
+    if (status) updatePayload.status = status;
+    if (priority) updatePayload.priority = priority;
+
+    // ✅ RE-ASSIGNMENT LOGIC
+    if (assignee_id !== undefined) {
+        // If it's already assigned to someone else, only Super Admin can change it
+        if (currentTicket.assignee_id && currentTicket.assignee_id !== assignee_id && !isSuperAdmin) {
+            return res.status(403).json({ error: "Only Super Admins can re-assign a ticket that is already in progress." });
+        }
+        updatePayload.assignee_id = assignee_id;
     }
     
-    updatePayload.updated_at = new Date();
     const { data: ticket, error } = await supabase
       .from('tickets')
       .update(updatePayload)
@@ -211,6 +222,7 @@ const updateTicket = async (req, res) => {
 
     await logActivity("Updated", `Ticket "${ticket.title}" updated by ${req.user.id}`, req.user.id);
     res.status(200).json(ticket);
+
   } catch (error) {
     res.status(500).json({ error: "Internal server error" });
   }
@@ -254,13 +266,28 @@ const deleteTicket = async (req, res) => {
 
 // --- GET ADMINS (FOR ASSIGNMENT) ---
 const getAdmins = async (req, res) => {
-  if (!req.locationId) return res.status(401).json({ error: 'Location required.' });
+  const isSuperAdmin = req.isSuperAdmin;
+  // If Super Admin selects a city, use that. Otherwise, use their session location.
+  const targetLocationId = (isSuperAdmin && req.query.location_id && req.query.location_id !== 'All') 
+    ? req.query.location_id 
+    : req.locationId;
+
+  if (!targetLocationId && !isSuperAdmin) {
+    return res.status(401).json({ error: 'Location required.' });
+  }
+
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from('users')
       .select('id, username')
-      .eq('role', 'admin')
-      .eq('location_id', req.locationId);
+      .eq('role', 'admin');
+
+    // Apply location filter if we have a specific city context
+    if (targetLocationId && targetLocationId !== 'All') {
+      query = query.eq('location_id', targetLocationId);
+    }
+
+    const { data, error } = await query;
     if (error) throw error;
     res.status(200).json(data);
   } catch (error) {
@@ -280,7 +307,7 @@ const getTicketCategories = async (req, res) => {
   }
 };
 
-// --- POST CHAT MESSAGE ---
+// --- POST CHAT MESSAGE (WITH AUTO-ASSIGNMENT LOGIC) ---
 const postChatMessage = async (req, res) => {
     const { ticketId } = req.params;
     const { message } = req.body;
@@ -290,9 +317,10 @@ const postChatMessage = async (req, res) => {
     if (!message) return res.status(400).json({ error: 'Message cannot be empty.' });
 
     try {
+        // 1. Fetch current ticket status and existing assignee
         const { data: ticket, error: ticketErr } = await supabase
             .from('tickets')
-            .select('status')
+            .select('status, assignee_id, title')
             .eq('id', ticketId)
             .single();
 
@@ -301,17 +329,39 @@ const postChatMessage = async (req, res) => {
             return res.status(403).json({ error: 'Cannot reply to a resolved ticket. Please reopen it first.' });
         }
 
+        // 2. Prepare Chat Payload
         const chatPayload = {
             ticket_id: ticketId,
             message: message
         };
 
-        if (userRole === 'admin' || userRole === 'super_admin') {
+        const isAdminSender = userRole === 'admin' || userRole === 'super_admin';
+
+        if (isAdminSender) {
             chatPayload.sender_user_id = senderId;
         } else {
             chatPayload.sender_student_id = senderId;
         }
 
+        // 3. ✅ AUTO-ASSIGNMENT LOGIC (THE "BETTER SOLUTION")
+        // If an admin/super_admin is replying and the ticket is currently unassigned
+        if (isAdminSender && !ticket.assignee_id) {
+            const { error: assignError } = await supabase
+                .from('tickets')
+                .update({ 
+                    assignee_id: senderId, 
+                    status: 'In Progress',
+                    updated_at: new Date().toISOString() 
+                })
+                .eq('id', ticketId);
+
+            if (assignError) console.error("Auto-assignment failed:", assignError);
+            else {
+                await logActivity("Auto-Assigned", `Ticket "${ticket.title}" auto-assigned to first responder ${senderId}`, senderId);
+            }
+        }
+
+        // 4. Insert the message
         const { data: newMessage, error: insertErr } = await supabase
             .from('ticket_chats')
             .insert([chatPayload])
@@ -329,9 +379,6 @@ const postChatMessage = async (req, res) => {
 
     } catch (error) {
         console.error("Error in postChatMessage:", error);
-        if (error.code === '23503') {
-            return res.status(400).json({ error: "Invalid sender ID. User/Student record not found." });
-        }
         res.status(500).json({ error: "Internal server error" });
     }
 };
