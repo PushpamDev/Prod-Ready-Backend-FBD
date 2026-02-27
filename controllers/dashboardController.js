@@ -1,19 +1,22 @@
-// controllers/dashboardController.js
 const supabase = require('../db');
 
 exports.getDashboardData = async (req, res) => {
-  // 1. Capture authorization and filter context from query params
+  // 1. Capture authorization context
   const userLocationId = req.locationId || req.user?.location_id; 
+  const isSuperAdmin = req.isSuperAdmin; // ✅ From auth middleware
+
   const { 
     search = '', 
     status, 
     batch, 
     undertaking, 
     startDate, 
-    endDate 
+    endDate,
+    location_id // ✅ Added for Super Admin city filtering
   } = req.query;
 
-  if (!userLocationId) {
+  // Standard Admins must have a location assigned
+  if (!isSuperAdmin && !userLocationId) {
     return res.status(403).json({ error: 'Access denied: No branch location assigned to user.' });
   }
 
@@ -21,7 +24,6 @@ exports.getDashboardData = async (req, res) => {
     /**
      * ✅ EXTENSIVE DATA FETCHING 
      * We query 'admissions' as base to get 'staff' details.
-     * We use !inner join on the view to ensure only records with valid financial data appear.
      */
     let query = supabase
       .from('admissions')
@@ -34,8 +36,18 @@ exports.getDashboardData = async (req, res) => {
         v_admission_financial_summary!inner (
           *
         )
-      `)
-      .eq('location_id', userLocationId); 
+      `);
+
+    // ✅ 🛡️ ROLE-BASED LOCATION FILTERING
+    if (isSuperAdmin) {
+      // Super Admin: Use specific location_id if provided, else show ALL locations
+      if (location_id && location_id !== 'all' && location_id !== 'All') {
+        query = query.eq('location_id', Number(location_id));
+      }
+    } else {
+      // Standard Admin: Strictly restricted to their own branch
+      query = query.eq('location_id', userLocationId);
+    }
 
     // ✅ DATE FILTERING
     if (startDate) query = query.gte('date_of_admission', startDate);
@@ -71,7 +83,6 @@ exports.getDashboardData = async (req, res) => {
     if (error) throw error;
 
     // ✅ 2. DATA MERGING & FLATTENING
-    // Fixed: Checking if financial summary is an array or an object
     const admissions = (data || []).map(record => {
       const financial = Array.isArray(record.v_admission_financial_summary)
         ? record.v_admission_financial_summary[0]
@@ -79,7 +90,7 @@ exports.getDashboardData = async (req, res) => {
 
       return {
         ...record,
-        ...financial, // Spread view calculations into the top level
+        ...financial, 
         processed_by_name: record.staff?.username || 'System'
       };
     });
@@ -98,22 +109,16 @@ exports.getDashboardData = async (req, res) => {
         return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
       }).length,
 
-      // Total money actually paid by students
       totalCollected: admissions.reduce((sum, r) => sum + Number(r.total_paid || 0), 0),
-      
-      // Total money still outstanding
       totalOutstanding: admissions.reduce((sum, r) => sum + Number(r.remaining_due || 0), 0),
 
-      // Count students with outstanding balance and 'Pending' status
       overdueCount: admissions.filter(r => 
         (r.status === 'Pending' || r.status === 'Partial') && Number(r.remaining_due || 0) > 0
       ).length,
 
-      // Count students who haven't finished their undertakings
       pendingUndertakings: admissions.filter(r => r.undertaking_status === 'Pending').length,
     };
 
-    // Return combined result
     res.status(200).json({
       metrics,
       admissions: admissions, 

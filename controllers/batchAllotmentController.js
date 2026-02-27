@@ -1,36 +1,47 @@
 // server/controllers/batchAllotmentController.js
-
 const supabase = require('../db');
 
 /* ===========================================================
-   GET BATCH ALLOTMENT LIST (MULTI-BRANCH & ROLE SAFE)
+   GET BATCH ALLOTMENT LIST (LOCATION & ROLE AWARE)
    =========================================================== */
-
 exports.getBatchAllotmentList = async (req, res) => {
-  const locationId = req.locationId;
-  const isSuperAdmin = req.isSuperAdmin; // ✅ From updated auth middleware
+  // Ensure locationId is treated as a Number for database comparison
+  const userLocationId = req.locationId ? Number(req.locationId) : null;
+  const isSuperAdmin = req.isSuperAdmin;
 
   try {
-    const { search = '' } = req.query;
+    // ✅ Extract search and optional location_id for Super Admin filtering
+    const { search = '', location_id } = req.query;
 
-    /* -------------------- 1️⃣ Base admission data -------------------- */
+    /* -------------------- 1️⃣ Fetch Unified Data from View -------------------- */
     let query = supabase
       .from('v_admission_financial_summary')
       .select(`
         admission_id,
-        student_id,
         admission_number,
         student_name,
         student_phone_number,
         courses_str,
         date_of_admission,
-        location_id
+        location_id,
+        batch_names,
+        remarks,
+        course_start_date,
+        joined
       `);
 
-    // ✅ ROLE-BASED FILTER: Only apply location restriction if NOT super_admin
-    if (!isSuperAdmin) {
-      if (!locationId) return res.status(401).json({ error: 'Location context missing.' });
-      query = query.eq('location_id', locationId);
+    /* -------------------- 🛡️ ROLE-BASED LOCATION LOGIC -------------------- */
+    if (isSuperAdmin) {
+      // ✅ Super Admin: Filter by specific city if provided, otherwise show global
+      if (location_id && location_id !== 'all' && location_id !== 'All') {
+        query = query.eq('location_id', Number(location_id));
+      }
+    } else {
+      // ✅ Standard Admin: Strictly restricted to their own branch
+      if (!userLocationId) {
+        return res.status(401).json({ error: 'Location context missing.' });
+      }
+      query = query.eq('location_id', userLocationId);
     }
 
     if (search) {
@@ -40,58 +51,35 @@ exports.getBatchAllotmentList = async (req, res) => {
     const { data: admissions, error } = await query.order('date_of_admission', { ascending: false });
 
     if (error) throw error;
+    
     if (!admissions || admissions.length === 0) return res.json([]);
 
-    const admissionIds = admissions.map(a => a.admission_id);
-    const studentIds = admissions.map(a => a.student_id);
-
-    /* -------------------- 2️⃣ Admission meta -------------------- */
-    const { data: admissionMeta, error: metaErr } = await supabase
-      .from('admissions')
-      .select('id, joined, course_start_date, remarks')
-      .in('id', admissionIds);
-
-    if (metaErr) throw metaErr;
-
-    const metaMap = Object.fromEntries((admissionMeta || []).map(a => [a.id, a]));
-
-    /* -------------------- 3️⃣ Batch mappings -------------------- */
-    const { data: batchRows, error: batchErr } = await supabase
-      .from('batch_students')
-      .select(`student_id, batches ( name )`)
-      .in('student_id', studentIds);
-
-    if (batchErr) throw batchErr;
-
-    const batchMap = {};
-    (batchRows || []).forEach(row => {
-      if (!row?.batches?.name) return;
-      if (!batchMap[row.student_id]) batchMap[row.student_id] = [];
-      batchMap[row.student_id].push(row.batches.name);
-    });
-
-    /* -------------------- 4️⃣ Final response -------------------- */
+    /* -------------------- 2️⃣ Final Response Construction -------------------- */
     const result = admissions.map(row => ({
         admission_id: row.admission_id,
         admission_number: row.admission_number,
         student_name: row.student_name,
         student_phone_number: row.student_phone_number,
-        course_name: row.courses_str,
+        course_name: row.courses_str || 'No Course Selected',
         admission_date: row.date_of_admission,
-        batch_names: batchMap[row.student_id] || [],
-        joined: metaMap[row.admission_id]?.joined ?? false,
-        joining_date: metaMap[row.admission_id]?.course_start_date ?? null,
-        remarks: metaMap[row.admission_id]?.remarks ?? '',
+        batch_names: row.batch_names || [],
+        joined: row.joined ?? false,
+        joining_date: row.course_start_date ?? null,
+        remarks: row.remarks ?? '',
+        location_id: row.location_id // ✅ Returning location_id for UI branch badges
     }));
 
     res.json(result);
 
   } catch (err) {
+    if (err.name === 'TypeError' && err.message.includes('fetch')) {
+      console.error('CRITICAL: Network connection to Supabase failed.');
+      return res.status(503).json({ error: 'Database connection offline.' });
+    }
     console.error('Batch Allotment Fetch Error:', err);
     res.status(500).json({ error: 'Failed to load batch allotment list' });
   }
 };
-
 /* ===========================================================
    UPDATE BATCH ALLOTMENT (CONTROLLER FIX)
    =========================================================== */

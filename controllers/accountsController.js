@@ -6,25 +6,36 @@ const supabase = require('../db');
  * Scoped by location_id with a global override for roles with 'super_admin'.
  */
 exports.getAdmissionsForAccounts = async (req, res) => {
-  const { status = 'Approved', search = '' } = req.query; 
-  const locationId = req.locationId;
-  const isSuperAdmin = req.isSuperAdmin; // ✅ Updated logic
+  // ✅ Support location_id query param for Super Admin filtering
+  const { status = 'Approved', search = '', location_id } = req.query; 
+  const userLocationId = req.locationId;
+  const isSuperAdmin = req.isSuperAdmin; 
 
   try {
     let query = supabase
       .from('v_admission_financial_summary') 
       .select('admission_number, admission_id, student_name, student_phone_number, created_at, total_payable_amount, total_paid, remaining_due, approval_status, status, base_amount, location_id');
 
-    // ✅ Branch Security: Apply location filter unless user is a super_admin
-    if (!isSuperAdmin) {
-      if (!locationId) return res.status(401).json({ error: 'Location context missing.' });
-      query = query.eq('location_id', locationId);
+    // ✅ BRANCH SECURITY BIFURCATION
+    if (isSuperAdmin) {
+      // Super Admin: Can filter by a specific city ID or see ALL branches if 'all' or omitted
+      if (location_id && location_id !== 'all' && location_id !== 'All') {
+        query = query.eq('location_id', Number(location_id));
+      }
+    } else {
+      // Standard Admin: Hard-locked to their assigned branch location
+      if (!userLocationId) {
+        return res.status(401).json({ error: 'Location context missing.' });
+      }
+      query = query.eq('location_id', userLocationId);
     }
 
+    // Existing Status Filtering
     if (status && status !== 'All') {
       query = query.eq('approval_status', status);
     }
 
+    // Existing Search Logic
     if (search) {
       query = query.or(`student_name.ilike.%${search}%,student_phone_number.ilike.%${search}%,admission_number.ilike.%${search}%`);
     }
@@ -43,7 +54,9 @@ exports.getAdmissionsForAccounts = async (req, res) => {
       approval_status: adm.approval_status,
       status: adm.status,
       phone_number: adm.student_phone_number || 'N/A',
-      base_amount: adm.base_amount
+      base_amount: adm.base_amount,
+      // ✅ Included so frontend can show branch labels (Faridabad, Pune, Ahmedabad)
+      location_id: adm.location_id 
     }));
 
     res.status(200).json(formattedData);

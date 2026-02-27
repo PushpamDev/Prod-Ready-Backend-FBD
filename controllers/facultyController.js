@@ -16,45 +16,62 @@ function getDynamicStatus(startDate, endDate) {
   }
 }
 
+/* ===========================================================
+   GET ALL FACULTY (LOCATION & ROLE AWARE)
+   =========================================================== */
 const getAllFaculty = async (req, res) => {
-  // --- NEW --- This route MUST be protected by auth
-  if (!req.locationId) {
+  const isSuperAdmin = req.isSuperAdmin;
+  const userLocationId = req.locationId;
+  const { location_id } = req.query; // ✅ For Super Admin filtering
+
+  // Standard Admin must have a location context
+  if (!userLocationId && !isSuperAdmin) {
     return res.status(401).json({ error: 'Authentication required with location.' });
   }
 
-  const { data, error } = await supabase
-    .from("faculty")
-    .select(`
-      id,
-      name,
-      email,
-      phone_number,
-      employment_type,
-      is_active,
-      skills ( id, name ),
-      faculty_availability ( id, day_of_week, start_time, end_time )
-    `)
-    // --- MODIFIED --- Filter by the user's location
-    .eq('location_id', req.locationId); 
+  try {
+    let query = supabase
+      .from("faculty")
+      .select(`
+        id, name, email, phone_number, employment_type, is_active, location_id,
+        skills ( id, name ),
+        faculty_availability ( id, day_of_week, start_time, end_time )
+      `);
 
-if (error){
-    console.error("Error fetching faculty:", error);
-    return res.status(500).json({ error: "Failed to fetch faculty" });
+    /* -------------------- 🛡️ ROLE-BASED FILTERING -------------------- */
+    if (isSuperAdmin) {
+      // Super Admin: Filter by city if provided, else Global
+      if (location_id && location_id !== 'all') {
+        query = query.eq('location_id', Number(location_id));
+      }
+    } else {
+      // Standard Admin: Strictly restricted to branch
+      query = query.eq('location_id', userLocationId);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error("Error fetching faculty:", error);
+      return res.status(500).json({ error: "Failed to fetch faculty" });
+    }
+
+    const transformedData = data.map(faculty => ({
+        id: faculty.id,
+        name: faculty.name,
+        email: faculty.email,
+        phone_number: faculty.phone_number,
+        type: faculty.employment_type,
+        isActive: faculty.is_active,
+        location_id: faculty.location_id, // ✅ Return for UI badges
+        skills: faculty.skills || [],
+        availability: faculty.faculty_availability || []
+    }));
+
+    res.status(200).json(transformedData);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
   }
-
-  // --- (Rest of function is unchanged) ---
-  const transformedData = data.map(faculty => ({
-      id: faculty.id,
-      name: faculty.name,
-      email: faculty.email,
-      phone_number: faculty.phone_number,
-      type: faculty.employment_type,
-      isActive: faculty.is_active,
-      skills: faculty.skills || [],
-      availability: faculty.faculty_availability || []
-  }));
-
-  res.status(200).json(transformedData);
 };
 
 const createFaculty = async (req, res) => {
@@ -313,55 +330,49 @@ const deleteFaculty = async (req, res) => {
   }
 };
 
-// ** CORRECTED FUNCTION **
+/* ===========================================================
+   GET FACULTY ACTIVE STUDENTS (LOCATION AWARE)
+   =========================================================== */
 const getFacultyActiveStudents = async (req, res) => {
-  // --- NEW --- This route MUST be protected by auth
-  if (!req.locationId) {
-    return res.status(401).json({ error: 'Authentication required with location.' });
-  }
+  const isSuperAdmin = req.isSuperAdmin;
+  const userLocationId = req.locationId;
+  const { location_id } = req.query;
 
   try {
-    // 1. Get all faculties *at this location*
-    const { data: faculties, error } = await supabase
+    let query = supabase
       .from("faculty")
       .select(`
-        id,
-        name,
+        id, name, location_id,
         batches (
-          id,
-          start_date,
-          end_date,
+          id, start_date, end_date,
           batch_students ( student_id )
         )
-      `)
-      // --- MODIFIED --- Filter by the user's location
-      .eq('location_id', req.locationId);
+      `);
 
+    if (isSuperAdmin) {
+      if (location_id && location_id !== 'all') query = query.eq('location_id', Number(location_id));
+    } else {
+      if (!userLocationId) return res.status(401).json({ error: 'Location missing.' });
+      query = query.eq('location_id', userLocationId);
+    }
+
+    const { data: faculties, error } = await query;
     if (error) throw error;
 
-    // --- (Rest of function is unchanged) ---
-    // 2. Process the data in JavaScript
     const facultyData = faculties.map(faculty => {
       const uniqueStudentIds = new Set();
-      
-      // Iterate over each faculty's batches
       (faculty.batches || []).forEach(batch => {
-        // Check if the batch is active
         const status = getDynamicStatus(batch.start_date, batch.end_date);
         if (status === "Active") {
-          // If active, add all its students to the Set
-          // The Set automatically handles duplicates
-          (batch.batch_students || []).forEach(student => {
-            uniqueStudentIds.add(student.student_id);
-          });
+          (batch.batch_students || []).forEach(student => uniqueStudentIds.add(student.student_id));
         }
       });
 
-      // The size of the Set is the total number of unique active students
       return {
         faculty_id: faculty.id,
         faculty_name: faculty.name,
         active_students: uniqueStudentIds.size,
+        location_id: faculty.location_id
       };
     });
 
@@ -398,25 +409,27 @@ const getFacultyTotalStudents = async (req, res) => {
   }
 };
 
-// ** NEW FUNCTION **
+/* ===========================================================
+   GET FACULTY STUDENT COUNTS (LOCATION AWARE)
+   =========================================================== */
 const getFacultyStudentCounts = async (req, res) => {
-  // --- NEW --- This route MUST be protected by auth
-  if (!req.locationId) {
-    return res.status(401).json({ error: 'Authentication required with location.' });
-  }
+  const isSuperAdmin = req.isSuperAdmin;
+  const userLocationId = req.locationId;
+  const { location_id } = req.query;
 
   try {
-    // 1. Get all faculties *at this location*
-    const { data: faculties, error: facultyError } = await supabase
-      .from("faculty")
-      .select("id, name")
-      // --- MODIFIED --- Filter by the user's location
-      .eq('location_id', req.locationId);
+    let query = supabase.from("faculty").select("id, name, location_id");
 
+    if (isSuperAdmin) {
+      if (location_id && location_id !== 'all') query = query.eq('location_id', Number(location_id));
+    } else {
+      if (!userLocationId) return res.status(401).json({ error: 'Location context missing.' });
+      query = query.eq('location_id', userLocationId);
+    }
+
+    const { data: faculties, error: facultyError } = await query;
     if (facultyError) throw facultyError;
 
-    // --- (Rest of function is unchanged) ---
-    // 2. For each faculty, call the RPC to get the count
     const counts = await Promise.all(
       faculties.map(async (faculty) => {
         const { data: count, error: rpcError } = await supabase.rpc(
@@ -424,12 +437,12 @@ const getFacultyStudentCounts = async (req, res) => {
           { faculty_uuid: faculty.id }
         );
         
-        if (rpcError) {
-           console.error(`Error fetching count for faculty ${faculty.id}:`, rpcError);
-           return { faculty_id: faculty.id, name: faculty.name, total_students: 0 };
-        }
-        
-        return { faculty_id: faculty.id, name: faculty.name, total_students: count };
+        return { 
+          faculty_id: faculty.id, 
+          name: faculty.name, 
+          total_students: rpcError ? 0 : count,
+          location_id: faculty.location_id 
+        };
       })
     );
 

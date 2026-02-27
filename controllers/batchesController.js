@@ -16,12 +16,27 @@ const getDynamicStatus = (startDate, endDate) => {
 
 const getAllBatches = async (req, res) => {
   try {
-    if (!req.locationId) {
+    const isSuperAdmin = req.isSuperAdmin;
+    const userLocationId = req.locationId;
+    const { facultyId, location_id } = req.query; // ✅ location_id added for Super Admin filtering
+
+    if (!userLocationId && !isSuperAdmin) {
       return res.status(401).json({ error: 'Authentication required with location.' });
     }
 
     const today = new Date().toISOString().split('T')[0];
-    const { facultyId } = req.query; // Removed 'status' from destructurer to avoid pre-filtering
+
+    /* -------------------- 🛡️ ROLE-BASED LOCATION LOGIC -------------------- */
+    let targetLocationId = null;
+    if (isSuperAdmin) {
+      // Super Admin: Can focus on one branch or see all if 'all'/undefined
+      if (location_id && location_id !== 'all' && location_id !== 'All') {
+        targetLocationId = Number(location_id);
+      }
+    } else {
+      // Admin/Faculty: Strictly restricted to their own branch
+      targetLocationId = Number(userLocationId);
+    }
 
     const [batchesResult, substitutionsResult, allFacultiesResult] = await Promise.all([
       (() => {
@@ -30,41 +45,44 @@ const getAllBatches = async (req, res) => {
           faculty:faculty_id(*),
           skill:skill_id(*),
           students:batch_students(count)
-        `).eq('location_id', req.locationId);
+        `);
+        
+        // Apply location filter if we are NOT in global Super Admin mode
+        if (targetLocationId) {
+          query = query.eq('location_id', targetLocationId);
+        }
         
         if (facultyId) {
           query = query.eq('faculty_id', facultyId);
         }
-
-        // ✅ REMOVED query.ilike('status', status) 
-        // We fetch all records so our 'getDynamicStatus' helper can 
-        // accurately categorize them regardless of what the DB column says.
-        
         return query;
       })(),
 
-      supabase.from('faculty_substitutions')
-        .select(`*, substitute:substitute_faculty_id(*), batches!inner(location_id)`)
-        .lte('start_date', today)
-        .gte('end_date', today)
-        .eq('batches.location_id', req.locationId),
+      (() => {
+        let subQuery = supabase.from('faculty_substitutions')
+          .select(`*, substitute:substitute_faculty_id(*), batches!inner(location_id)`)
+          .lte('start_date', today)
+          .gte('end_date', today);
+        
+        if (targetLocationId) {
+          subQuery = subQuery.eq('batches.location_id', targetLocationId);
+        }
+        return subQuery;
+      })(),
 
-      supabase.from('faculty').select('*').eq('location_id', req.locationId)
+      (() => {
+        let facQuery = supabase.from('faculty').select('*');
+        if (targetLocationId) {
+          facQuery = facQuery.eq('location_id', targetLocationId);
+        }
+        return facQuery;
+      })()
     ]);
 
     if (batchesResult.error) throw batchesResult.error;
-    if (substitutionsResult.error) throw substitutionsResult.error;
-    if (allFacultiesResult.error) throw allFacultiesResult.error;
-
-    const allBatches = batchesResult.data;
-    const activeSubstitutions = substitutionsResult.data;
-    const allFaculties = allFacultiesResult.data;
-
-    const formattedData = allBatches.map(batch => {
-      const activeSub = activeSubstitutions.find(sub => sub.batch_id === batch.id);
-      
-      // ✅ HELPER LOGIC: This determines if it's 'active' or 'completed' 
-      // based on CURRENT TIME.
+    
+    const formattedData = (batchesResult.data || []).map(batch => {
+      const activeSub = (substitutionsResult.data || []).find(sub => sub.batch_id === batch.id);
       const currentStatus = getDynamicStatus(batch.start_date, batch.end_date);
 
       let finalBatch = {
@@ -75,22 +93,20 @@ const getAllBatches = async (req, res) => {
       };
 
       if (activeSub && activeSub.substitute) {
-        const originalFaculty = allFaculties.find(f => f.id === activeSub.original_faculty_id);
+        const originalFaculty = (allFacultiesResult.data || []).find(f => f.id === activeSub.original_faculty_id);
         finalBatch.isSubstituted = true;
         finalBatch.faculty = activeSub.substitute;
         finalBatch.faculty_id = activeSub.substitute_faculty_id;
         finalBatch.original_faculty = originalFaculty ? { id: originalFaculty.id, name: originalFaculty.name } : null;
         finalBatch.substitutionDetails = activeSub;
       }
-
       return finalBatch;
     });
     
-    // Logic for Faculty Users
+    // Logic for Faculty Users: Filter the scoped results to only show their own batches
     if (req.user && req.user.role === 'faculty') {
         const targetFacultyId = req.user.faculty_id;
-        const facultyBatches = formattedData.filter(batch => batch.faculty_id === targetFacultyId);
-        return res.json(facultyBatches);
+        return res.json(formattedData.filter(batch => batch.faculty_id === targetFacultyId));
     }
 
     res.json(formattedData);
@@ -99,6 +115,8 @@ const getAllBatches = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+
 const createBatch = async (req, res) => {
   // --- NEW --- This route MUST be protected by auth to get req.locationId
   if (!req.locationId) {
@@ -460,39 +478,38 @@ const getBatchStudents = async (req, res) => {
 };
 
 const getActiveStudentsCount = async (req, res) => {
-  // Ensure location context exists
-  if (!req.locationId) {
+  const isSuperAdmin = req.isSuperAdmin;
+  const userLocationId = req.locationId;
+  const { location_id } = req.query;
+
+  if (!userLocationId && !isSuperAdmin) {
     return res.status(401).json({ error: 'Authentication required with location context.' });
   }
   
   try {
     const now = new Date().toISOString();
+    let targetLocationId = null;
 
-    /**
-     * ✅ OPTIMIZATION: 
-     * Instead of fetching all batches and filtering in JS, 
-     * we query Supabase for batches that are currently "Active" based on dates.
-     */
-    const { data: activeBatches, error: batchesError } = await supabase
-      .from("batches")
-      .select("id")
-      .eq('location_id', req.locationId)
-      .lte('start_date', now)   // Started on or before today
-      .gte('end_date', now);    // Ends on or after today
+    if (isSuperAdmin) {
+      if (location_id && location_id !== 'all') targetLocationId = Number(location_id);
+    } else {
+      targetLocationId = Number(userLocationId);
+    }
 
+    let query = supabase.from("batches").select("id").lte('start_date', now).gte('end_date', now);
+
+    if (targetLocationId) {
+      query = query.eq('location_id', targetLocationId);
+    }
+
+    const { data: activeBatches, error: batchesError } = await query;
     if (batchesError) throw batchesError;
 
-    // If no batches are currently active, return 0 immediately
     if (!activeBatches || activeBatches.length === 0) {
-      return res.status(200).json({ total_active_students: 0 });
+      return res.status(200).json({ total_active_students: 0, active_batches_count: 0 });
     }
 
     const activeBatchIds = activeBatches.map((b) => b.id);
-
-    /**
-     * ✅ JOIN CHECK:
-     * Fetch unique student IDs linked to these specific active batches.
-     */
     const { data: studentLinks, error: studentLinksError } = await supabase
       .from("batch_students")
       .select("student_id")
@@ -500,20 +517,19 @@ const getActiveStudentsCount = async (req, res) => {
 
     if (studentLinksError) throw studentLinksError;
 
-    // Use a Set to ensure we don't double-count students enrolled in multiple active batches
     const uniqueStudentIds = new Set((studentLinks || []).map((link) => link.student_id));
-    const totalActiveStudents = uniqueStudentIds.size;
 
     res.status(200).json({ 
-      total_active_students: totalActiveStudents,
+      total_active_students: uniqueStudentIds.size,
       active_batches_count: activeBatchIds.length 
     });
 
   } catch (error) {
     console.error('Error in getActiveStudentsCount:', error);
-    res.status(500).json({ error: 'Failed to calculate active student metrics.' });
+    res.status(500).json({ error: 'Failed to calculate metrics.' });
   }
 };
+
 
 const getRemarkHistory = async (req, res) => {
   const { admissionId } = req.params;
