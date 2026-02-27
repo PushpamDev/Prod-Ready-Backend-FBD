@@ -6,7 +6,6 @@ const supabase = require('../db');
  * Scoped by location_id with a global override for roles with 'super_admin'.
  */
 exports.getAdmissionsForAccounts = async (req, res) => {
-  // ✅ Support location_id query param for Super Admin filtering
   const { status = 'Approved', search = '', location_id } = req.query; 
   const userLocationId = req.locationId;
   const isSuperAdmin = req.isSuperAdmin; 
@@ -14,28 +13,34 @@ exports.getAdmissionsForAccounts = async (req, res) => {
   try {
     let query = supabase
       .from('v_admission_financial_summary') 
-      .select('admission_number, admission_id, student_name, student_phone_number, created_at, total_payable_amount, total_paid, remaining_due, approval_status, status, base_amount, location_id');
+      .select(`
+        admission_number, 
+        admission_id, 
+        student_name, 
+        student_phone_number, 
+        created_at, 
+        total_payable_amount, 
+        total_paid, 
+        remaining_due, 
+        approval_status, 
+        status, 
+        base_amount, 
+        location_id,
+        courses_str,
+        certificate_name,
+        batch_name
+      `);
 
-    // ✅ BRANCH SECURITY BIFURCATION
     if (isSuperAdmin) {
-      // Super Admin: Can filter by a specific city ID or see ALL branches if 'all' or omitted
-      if (location_id && location_id !== 'all' && location_id !== 'All') {
+      if (location_id && location_id !== 'all') {
         query = query.eq('location_id', Number(location_id));
       }
     } else {
-      // Standard Admin: Hard-locked to their assigned branch location
-      if (!userLocationId) {
-        return res.status(401).json({ error: 'Location context missing.' });
-      }
+      if (!userLocationId) return res.status(401).json({ error: 'Location context missing.' });
       query = query.eq('location_id', userLocationId);
     }
 
-    // Existing Status Filtering
-    if (status && status !== 'All') {
-      query = query.eq('approval_status', status);
-    }
-
-    // Existing Search Logic
+    if (status && status !== 'All') query.eq('approval_status', status);
     if (search) {
       query = query.or(`student_name.ilike.%${search}%,student_phone_number.ilike.%${search}%,admission_number.ilike.%${search}%`);
     }
@@ -54,18 +59,18 @@ exports.getAdmissionsForAccounts = async (req, res) => {
       approval_status: adm.approval_status,
       status: adm.status,
       phone_number: adm.student_phone_number || 'N/A',
-      base_amount: adm.base_amount,
-      // ✅ Included so frontend can show branch labels (Faridabad, Pune, Ahmedabad)
+      // ✅ New fields for frontend
+      courses_str: adm.courses_str || 'N/A',
+      certificate_name: adm.certificate_name || 'N/A',
+      batch_name: adm.batch_name || 'Not Allotted',
       location_id: adm.location_id 
     }));
 
     res.status(200).json(formattedData);
   } catch (error) {
-    console.error('Error fetching admissions for accounts:', error);
     res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
-
 /**
  * @description Approve an admission.
  */
