@@ -9,6 +9,7 @@ const {
   getAdmins,
   studentLogin,
   deleteUser, // ✅ New
+  updateUser, // ✅ New
 } = require("../controllers/userController");
 
 // --- MIDDLEWARE ---
@@ -60,5 +61,12 @@ router.patch("/assign-role", auth, admin, assignRole);
 
 // Add this line to your routes file
 router.delete("/:userId", auth, admin, deleteUser);
+
+/**
+ * ✅ NEW: Update User
+ * Scoped by location for Admins; Global for Super Admins
+ */
+// ✅ Ensure the ':userId' is present
+router.patch("/update/:userId", auth, admin, updateUser);
 
 module.exports = router;

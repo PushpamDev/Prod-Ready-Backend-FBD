@@ -351,6 +351,81 @@ const deleteUser = async (req, res) => {
   }
 };
 
+/**
+ * Update User (Profile, Role, and Password Reset)
+ * Super Admin: Full global control.
+ * Branch Admin: Can update users within their own branch.
+ */
+const updateUser = async (req, res) => {
+  const { userId } = req.params;
+  const { username, phone_number, password, role, location_id } = req.body;
+  const isSuperAdmin = req.isSuperAdmin;
+  const adminLocationId = req.locationId;
+
+  if (!userId) {
+    return res.status(400).json({ error: "User ID is required." });
+  }
+
+  try {
+    // 1. Verification: Check if user exists and verify location access
+    const { data: targetUser, error: fetchError } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", userId)
+      .single();
+
+    if (fetchError || !targetUser) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    // 2. Security Bypass Check
+    if (!isSuperAdmin && targetUser.location_id !== adminLocationId) {
+      return res.status(403).json({ error: "Unauthorized: You cannot modify users from other branches." });
+    }
+
+    // 3. Construct Update Object
+    const updates = {};
+    if (username) updates.username = username.trim();
+    if (phone_number !== undefined) updates.phone_number = phone_number;
+    
+    // Role & Location updates are high-privilege
+    if (role) updates.role = role.toLowerCase();
+    if (location_id && isSuperAdmin) updates.location_id = parseInt(location_id);
+
+    // 4. Password Reset Logic (if provided)
+    if (password && password.trim() !== "") {
+      const salt = await bcrypt.genSalt(10);
+      updates.password_hash = await bcrypt.hash(password, salt);
+    }
+
+    // 5. Execute Update
+    const { data, error: updateError } = await supabase
+      .from("users")
+      .update(updates)
+      .eq("id", userId)
+      .select("id, username, role, location_id")
+      .single();
+
+    if (updateError) {
+      if (updateError.code === '23505') return res.status(409).json({ error: "Conflict: Identity already exists." });
+      throw updateError;
+    }
+
+    // 6. Audit Log
+    const changeDesc = password ? "Reset Password & Profile" : "Updated Profile";
+    await logActivity(
+      "Updated", 
+      `${changeDesc} for user "${targetUser.username}"`, 
+      req.user?.id || "admin"
+    );
+
+    res.status(200).json({ message: "User updated successfully.", user: data });
+  } catch (error) {
+    console.error("Update User Error:", error.message);
+    res.status(500).json({ error: "An unexpected error occurred during user update." });
+  }
+};
+
 module.exports = {
   createUser,
   createUserBySuperAdmin, // ✅ New
@@ -359,5 +434,6 @@ module.exports = {
   assignRole,
   getAdmins,
   studentLogin,
+  updateUser, // ✅ New
   deleteUser
 };
