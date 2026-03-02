@@ -4,8 +4,10 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { logActivity } = require("./logActivity");
 
+/**
+ * Standard User Creation (Self-Registration or Branch Admin)
+ */
 const createUser = async (req, res) => {
-  // --- MODIFIED --- Now requires locationName
   const { username, phone_number, password, locationName } = req.body;
 
   if ((!username && !phone_number) || !password || !locationName) {
@@ -14,7 +16,7 @@ const createUser = async (req, res) => {
       .json({ error: "Username/phone, password, and locationName are required" });
   }
   
-  // --- NEW --- Get the location ID from its name
+  // Get the location ID from its name
   const { data: loc, error: locError } = await supabase
     .from('locations')
     .select('id')
@@ -25,101 +27,132 @@ const createUser = async (req, res) => {
     return res.status(404).json({ error: 'Location not found.' });
   }
   const locationId = loc.id;
-  // --- END NEW ---
 
-  // Hash the password
-  const salt = await bcrypt.genSalt(10);
   const password_hash = await bcrypt.hash(password, 10);
 
-  // Create the user
   const { data, error } = await supabase
     .from("users")
-    // --- MODIFIED --- Insert with location_id
     .insert([{ username, phone_number, password_hash, location_id: locationId }])
     .select()
     .single();
 
   if (error) {
-    // --- MODIFIED --- Handle unique constraint error
-    if (error.code === '23505') { // unique_violation
-        return res.status(409).json({ error: 'User with this username or phone already exists at this location.' });
+    if (error.code === '23505') {
+        return res.status(409).json({ error: 'User already exists at this location.' });
     }
     return res.status(500).json({ error: "Failed to create user" });
   }
 
-  await logActivity("Created", `User "${username || phoneNumber}"`, "system");
-
+  await logActivity("Created", `User "${username || phone_number}"`, "system");
   res.status(201).json(data);
+};
+
+/**
+ * Super Admin Specific User Creation
+ * Allows direct role assignment and location selection
+ */
+const createUserBySuperAdmin = async (req, res) => {
+  // ✅ FIX: Match your middleware's boolean flag for Super Admin status
+  if (!req.isSuperAdmin) {
+    return res.status(403).json({ error: "Unauthorized: Super Admin access required." });
+  }
+
+  const { username, phone_number, password, location_id, role, faculty_id } = req.body;
+
+  // Validation: username and password are standard, location_id and role are required for provisioning
+  if (!username || !password || !location_id || !role) {
+    return res.status(400).json({ error: "Username, Password, Location, and Role are required." });
+  }
+
+  try {
+    // Generate salt and hash the password
+    const salt = await bcrypt.genSalt(10);
+    const password_hash = await bcrypt.hash(password, salt);
+
+    // Prepare payload matching your database terms
+    const userPayload = {
+      username: username.trim(),
+      phone_number: phone_number || null,
+      password_hash,
+      location_id: parseInt(location_id), // ✅ FIX: Ensure integer type for DB
+      role: role.toLowerCase(), // Ensure it matches 'faculty', 'admin', etc.
+      faculty_id: faculty_id || null // Link faculty if provided
+    };
+
+    const { data, error } = await supabase
+      .from("users")
+      .insert([userPayload])
+      .select()
+      .single();
+
+    if (error) {
+      // Handle the unique constraint (username + location_id) or (phone_number + location_id)
+      if (error.code === '23505') {
+        return res.status(409).json({ error: 'Identity already exists at this specific branch location.' });
+      }
+      throw error;
+    }
+
+    // Log activity using the logged-in Super Admin's details
+    await logActivity(
+      "Created", 
+      `SuperAdmin provisioned ${role} account for ${username} at branch ${location_id}`, 
+      req.user?.id || "SuperAdmin"
+    );
+
+    res.status(201).json(data);
+  } catch (error) {
+    console.error("SuperAdmin Provisioning Error:", error.message);
+    res.status(500).json({ error: "An internal server error occurred while creating the user." });
+  }
 };
 
 const login = async (req, res) => {
   try {
-    const { username, password, locationName } = req.body; // --- MODIFIED ---
+    const { username, password, locationName } = req.body;
 
-    if (!username || !password || !locationName) { // --- MODIFIED ---
-      return res
-        .status(400)
-        .json({ error: "Username, password, and locationName are required" });
+    if (!username || !password || !locationName) {
+      return res.status(400).json({ error: "Username, password, and locationName are required" });
     }
 
-    // --- NEW --- Get the location ID from its name
     const { data: loc, error: locError } = await supabase
       .from('locations')
       .select('id')
       .eq('name', locationName)
       .single();
 
-    if (locError || !loc) {
-      return res.status(404).json({ error: 'Location not found.' });
-    }
+    if (locError || !loc) return res.status(404).json({ error: 'Location not found.' });
     const locationId = loc.id;
-    // --- END NEW ---
 
     const { data: user, error } = await supabase
       .from("users")
       .select("*")
-      .eq('location_id', locationId) // --- MODIFIED ---
+      .eq('location_id', locationId)
       .or(`username.eq.${username},phone_number.eq.${username}`)
       .single();
 
-    if (error && error.code !== "PGRST116") {
-      console.error("Error finding user:", error);
-      return res.status(500).json({ error: "Failed to find user" });
-    }
-
-    if (!user) {
-      return res.status(404).json({ error: "User not found at this location" });
-    }
+    if (!user) return res.status(404).json({ error: "User not found at this location" });
 
     const validPassword = await bcrypt.compare(password, user.password_hash);
-    if (!validPassword) {
-      return res.status(401).json({ error: "Invalid password" });
-    }
+    if (!validPassword) return res.status(401).json({ error: "Invalid password" });
 
-    // --- MODIFIED --- This is the key change
-    // We add all the info the frontend needs into the token
     let tokenPayload = { 
-      userId: user.id, // AuthContext expects 'userId'
+      userId: user.id, 
       role: user.role, 
       locationId: user.location_id,
-      username: user.username,     // --- NEW ---
-      locationName: locationName   // --- NEW ---
+      username: user.username,
+      locationName: locationName,
+      isSuperAdmin: user.role === 'super_admin'
     };
 
-    if (user.role === "faculty") {
-      tokenPayload.id = user.faculty_id; // AuthContext expects 'id' for faculty
-    }
+    if (user.role === "faculty") tokenPayload.id = user.faculty_id;
 
-    const token = jwt.sign(
-      tokenPayload,
-      process.env.JWT_SECRET,
-      { expiresIn: "64h" }
-    );
+    const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: "64h" });
 
     res.status(200).json({ 
       token,
       user: {
-        userId: user.id, // Matching your token payload logic
+        userId: user.id,
         username: user.username,
         role: user.role,
         locationId: user.location_id,
@@ -127,103 +160,113 @@ const login = async (req, res) => {
       }
     }); 
   } catch (error) {
-    console.error("Login error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
+
+/**
+ * Get Users - Super Admin can see all, Branch Admin only sees their own
+ */
 const getAllUsers = async (req, res) => {
-  // --- MODIFIED --- This query is now filtered by location
-  // Note: You must add the `auth` middleware to this route in your routes file
-  const { data, error } = await supabase
-    .from("users")
-    .select("id, username, phone_number, role")
-    .eq('location_id', req.locationId); // <-- Filter by user's location
+  // ✅ FIX: Use req.isSuperAdmin (as set in your auth.js middleware)
+  const isSuperAdmin = req.isSuperAdmin; 
+  const userLocationId = req.locationId;
+  
+  // ✅ Get the override from URL (?location_id=2)
+  const { location_id } = req.query; 
 
-  if (error) {
+  try {
+    let query = supabase
+      .from("users")
+      .select("id, username, phone_number, role, location_id, created_at");
+
+    if (isSuperAdmin) {
+      // ✅ Super Admin Bypass: Only filter if a specific city is requested
+      if (location_id && location_id !== 'all') {
+        query = query.eq('location_id', Number(location_id));
+      }
+      // If 'all' or omitted, no .eq() filter is applied = Global View
+    } else {
+      // ✅ Standard Admin: Forced lockdown to their branch
+      if (!userLocationId) {
+        return res.status(401).json({ error: 'Location context missing.' });
+      }
+      query = query.eq('location_id', userLocationId);
+    }
+
+    const { data, error } = await query.order('created_at', { ascending: false });
+    if (error) throw error;
+
+    // ✅ Force browser to ignore 304 cache and show fresh data
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).json(data);
+  } catch (error) {
     console.error("Error fetching users:", error);
-    return res.status(500).json({ error: "Failed to fetch users" });
+    res.status(500).json({ error: "Failed to fetch users" });
   }
-
-  res.status(200).json(data);
 };
 
 const getAdmins = async (req, res) => {
-  // --- MODIFIED --- This query is now filtered by location
-  // Note: You must add the `auth` middleware to this route in your routes file
-  try {
-    const { data: admins, error } = await supabase
-      .from('users')
-      .select('id, username')
-      .eq('role', 'admin')
-      .eq('location_id', req.locationId); // <-- Filter by user's location
+  const isSuperAdmin = req.role === 'super_admin';
+  const { location_id } = req.query;
 
-    if (error) {
-      console.error("Error fetching admins:", error);
-      return res.status(500).json({ error: "Failed to fetch admins" });
+  try {
+    let query = supabase
+      .from('users')
+      .select('id, username, location_id')
+      .eq('role', 'admin');
+
+    if (!isSuperAdmin) {
+      query = query.eq('location_id', req.locationId);
+    } else if (location_id && location_id !== 'all') {
+      query = query.eq('location_id', location_id);
     }
+
+    const { data: admins, error } = await query;
+    if (error) throw error;
 
     res.status(200).json(admins);
   } catch (error) {
-    console.error("Internal server error while fetching admins:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
 
 const assignRole = async (req, res) => {
-  // --- NO CHANGE NEEDED ---
-  // This function operates on a specific 'userId' (a UUID),
-  // which is already unique. The filtering should happen
-  // on the frontend (i.e., an admin from Faridabad should
-  // only see users from Faridabad to assign roles to),
-  // which is now handled by our change to `getAllUsers`.
-  
   const { userId, role } = req.body;
+  const isSuperAdmin = req.role === 'super_admin';
 
-  if (!userId || !role) {
-    return res.status(400).json({ error: "User ID and role are required" });
-  }
-
-  if (role !== "admin" && role !== "faculty") {
-    return res.status(400).json({ error: "Invalid role specified" });
-  }
-
-  const { data, error } = await supabase
-    .from("users")
-    .update({ role })
-    .eq("id", userId)
-    .select()
-    .single();
-
-  if (error) {
-    console.error("Error assigning role:", error);
-    return res.status(500).json({ error: "Failed to assign role" });
-  }
-
-  if (!data) {
-    return res.status(404).json({ error: "User not found" });
-  }
-
-  await logActivity(
-    "Updated",
-    `Assigned role "${role}" to user ${data.username || data.phone_number}`,
-    "admin"
-  );
-
-  res.status(200).json(data);
-};
-
-// =======================================================
-// --- NEW STUDENT LOGIN (Add this function) ---
-// =======================================================
-const studentLogin = async (req, res) => {
-  const { admission_number, phone_number } = req.body;
-
-  if (!admission_number || !phone_number) {
-    return res.status(400).json({ error: 'Admission Number and Phone Number are required.' });
-  }
+  if (!userId || !role) return res.status(400).json({ error: "User ID and role required" });
 
   try {
-    // 1. Find the student in the 'students' table
+    // Branch Admin safety check
+    if (!isSuperAdmin) {
+      const { data: targetUser } = await supabase.from('users').select('location_id').eq('id', userId).single();
+      if (targetUser.location_id !== req.locationId) {
+        return res.status(403).json({ error: "Unauthorized: User belongs to another branch." });
+      }
+    }
+
+    const { data, error } = await supabase
+      .from("users")
+      .update({ role })
+      .eq("id", userId)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    await logActivity("Updated", `Assigned role "${role}" to ${data.username}`, req.user.id);
+    res.status(200).json(data);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to assign role" });
+  }
+};
+
+const studentLogin = async (req, res) => {
+  const { admission_number, phone_number } = req.body;
+  if (!admission_number || !phone_number) return res.status(400).json({ error: 'Required fields missing.' });
+
+  try {
     const { data: student, error } = await supabase
       .from('students')
       .select('id, name, phone_number, admission_number, location_id') 
@@ -231,47 +274,90 @@ const studentLogin = async (req, res) => {
       .eq('phone_number', phone_number)
       .single();
 
-    if (error || !student) {
-      return res.status(401).json({ error: 'Invalid credentials. Please check your Admission ID and Registered Mobile Number.' });
-    }
+    if (error || !student) return res.status(401).json({ error: 'Invalid credentials.' });
 
-    // 2. Generate Token
-    // We explicitly set role: 'student' so auth.js knows to look in the students table
     const token = jwt.sign(
-      { 
-        id: student.id, 
-        role: 'student', // <--- IMPORTANT: This tells auth.js it's a student
-        name: student.name,
-        location_id: student.location_id 
-      },
+      { id: student.id, role: 'student', name: student.name, location_id: student.location_id },
       process.env.JWT_SECRET,
-      { expiresIn: '7d' } // Students get a longer session
+      { expiresIn: '7d' }
     );
 
-    // 3. Return Token & User Data
     res.status(200).json({
-      message: 'Login successful',
       token,
-      user: {
-        id: student.id,
-        name: student.name,
-        role: 'student',
-        admission_number: student.admission_number,
-        phone_number: student.phone_number,
-        location_id: student.location_id
-      }
+      user: { id: student.id, name: student.name, role: 'student', location_id: student.location_id }
     });
-
   } catch (err) {
-    console.error('Student Login Error:', err);
-    res.status(500).json({ error: 'An unexpected error occurred during login.' });
+    res.status(500).json({ error: 'An unexpected error occurred.' });
   }
 };
+
+/**
+ * Delete User
+ * Super Admin: Can delete any user.
+ * Branch Admin: Can only delete users within their assigned location.
+ */
+const deleteUser = async (req, res) => {
+  const { userId } = req.params;
+  const isSuperAdmin = req.isSuperAdmin;
+  const adminLocationId = req.locationId;
+
+  if (!userId) {
+    return res.status(400).json({ error: "User ID is required." });
+  }
+
+  try {
+    // 1. Fetch user to check existence and location
+    const { data: targetUser, error: fetchError } = await supabase
+      .from("users")
+      .select("id, username, location_id, role")
+      .eq("id", userId)
+      .single();
+
+    if (fetchError || !targetUser) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    // 2. Security: Prevent non-SuperAdmins from deleting across branches
+    if (!isSuperAdmin && targetUser.location_id !== adminLocationId) {
+      return res.status(403).json({ 
+        error: "Unauthorized: You can only delete users from your own branch." 
+      });
+    }
+
+    // 3. Security: Prevent deleting other Super Admins (optional but recommended)
+    if (targetUser.role === 'super_admin' && req.user.role !== 'super_admin') {
+        return res.status(403).json({ error: "Unauthorized: Cannot delete a Super Admin." });
+    }
+
+    // 4. Perform Delete
+    const { error: deleteError } = await supabase
+      .from("users")
+      .delete()
+      .eq("id", userId);
+
+    if (deleteError) throw deleteError;
+
+    // 5. Log activity
+    await logActivity(
+      "Deleted", 
+      `User account "${targetUser.username}" removed by ${isSuperAdmin ? 'SuperAdmin' : 'BranchAdmin'}`, 
+      req.user?.id || "admin"
+    );
+
+    res.status(200).json({ message: "User deleted successfully." });
+  } catch (error) {
+    console.error("Delete User Error:", error.message);
+    res.status(500).json({ error: "An unexpected error occurred while deleting the user." });
+  }
+};
+
 module.exports = {
   createUser,
+  createUserBySuperAdmin, // ✅ New
   login,
   getAllUsers,
   assignRole,
   getAdmins,
   studentLogin,
+  deleteUser
 };

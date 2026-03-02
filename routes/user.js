@@ -2,39 +2,63 @@ const express = require("express");
 const router = express.Router();
 const {
   createUser,
+  createUserBySuperAdmin, // ✅ Added for Super Admin Provisioning
   getAllUsers,
   assignRole,
   login,
   getAdmins,
   studentLogin,
+  deleteUser, // ✅ New
 } = require("../controllers/userController");
 
-// --- NEW --- Import middleware
+// --- MIDDLEWARE ---
 const auth = require("../middleware/auth");
 const admin = require("../middleware/admin");
 
-// --- MODIFIED ---
-// Create user should be an admin-only action
-// It needs 'auth' so the controller can get 'req.locationId'
-router.post("/create", auth, admin, createUser);
+/* ================= PUBLIC ROUTES ================= */
 
-// --- NO CHANGE ---
 // Login MUST be public
 router.post("/login", login);
 
-// --- MODIFIED ---
-// Getting all users should be an admin-only action
-// It needs 'auth' to filter by location
-router.get("/", auth, admin, getAllUsers);
+// Student Portal Login
+router.post('/auth/student/login', studentLogin);
 
-// --- MODIFIED ---
-// Assigning roles is a critical admin-only action
-router.patch("/assign-role", auth, admin, assignRole);
 
-// --- MODIFIED ---
-// Get admins (for dropdowns, etc.) should be for any logged-in user
-// It needs 'auth' to filter by location
+/* ================= PROTECTED ROUTES ================= */
+
+/**
+ * ✅ NEW: Super Admin Provisioning
+ * Exclusive to Super Admins to create users for ANY location/role.
+ * auth: identifies user, admin: extra security check (optional if auth handles it)
+ */
+router.post("/super-provision", auth, createUserBySuperAdmin);
+
+/**
+ * Standard User Creation
+ * Limited to Branch Admin's own location via req.locationId
+ */
+router.post("/create", auth, admin, createUser);
+
+/**
+ * Getting Users
+ * Super Admin gets global list (or filtered by query param)
+ * Standard Admin gets branch-locked list
+ */
+router.get("/", auth, getAllUsers);
+
+/**
+ * Get Admins (for assignments/dropdowns)
+ * Scoped by location in the controller
+ */
 router.get("/admins", auth, getAdmins);
 
-router.post('/auth/student/login', studentLogin);
+/**
+ * Assigning Roles
+ * Scoped by location for Admins; Global for Super Admins
+ */
+router.patch("/assign-role", auth, admin, assignRole);
+
+// Add this line to your routes file
+router.delete("/:userId", auth, admin, deleteUser);
+
 module.exports = router;
