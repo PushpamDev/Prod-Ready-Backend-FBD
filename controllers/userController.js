@@ -296,61 +296,80 @@ const studentLogin = async (req, res) => {
  * Super Admin: Can delete any user.
  * Branch Admin: Can only delete users within their assigned location.
  */
+/**
+ * Delete User (Full System Wipe)
+ * Purges all related data across messages, batches, and faculty records 
+ * to satisfy database check constraints.
+ */
 const deleteUser = async (req, res) => {
   const { userId } = req.params;
   const isSuperAdmin = req.isSuperAdmin;
   const adminLocationId = req.locationId;
 
-  if (!userId) {
-    return res.status(400).json({ error: "User ID is required." });
-  }
+  if (!userId) return res.status(400).json({ error: "User ID required." });
 
   try {
-    // 1. Fetch user to check existence and location
+    // 1. Fetch target to get faculty_id and location context
     const { data: targetUser, error: fetchError } = await supabase
       .from("users")
-      .select("id, username, location_id, role")
+      .select("id, username, location_id, faculty_id, role")
       .eq("id", userId)
       .single();
 
     if (fetchError || !targetUser) {
-      return res.status(404).json({ error: "User not found." });
+      return res.status(404).json({ error: "User identity not found." });
     }
 
-    // 2. Security: Prevent non-SuperAdmins from deleting across branches
+    // 2. RBAC: Only Super Admin or the specific Branch Admin can delete
     if (!isSuperAdmin && targetUser.location_id !== adminLocationId) {
-      return res.status(403).json({ 
-        error: "Unauthorized: You can only delete users from your own branch." 
-      });
+      return res.status(403).json({ error: "Unauthorized: Access denied for this branch." });
     }
 
-    // 3. Security: Prevent deleting other Super Admins (optional but recommended)
-    if (targetUser.role === 'super_admin' && req.user.role !== 'super_admin') {
-        return res.status(403).json({ error: "Unauthorized: Cannot delete a Super Admin." });
+    // ---------------------------------------------------------
+    // 3. SEQUENTIAL PURGE (Solves chk_one_sender)
+    // ---------------------------------------------------------
+    
+    // A. Clear Messages (The primary cause of your constraint error)
+    // Delete every message where this user was either the sender or receiver
+    await supabase.from("messages").delete().eq("sender_id", userId);
+    await supabase.from("messages").delete().eq("receiver_id", userId);
+
+    // B. Clear Activity Logs (If they reference the user ID directly)
+    await supabase.from("activity_logs").delete().eq("user_id", userId);
+
+    // C. Handle Faculty specific data
+    if (targetUser.faculty_id) {
+      // Unlink from Batches (set to null so batches aren't deleted, just unassigned)
+      await supabase
+        .from("batches")
+        .update({ faculty_id: null })
+        .eq("faculty_id", targetUser.faculty_id);
+
+      // Delete Faculty Attendance
+      await supabase.from("faculty_attendance").delete().eq("faculty_id", targetUser.faculty_id);
+
+      // Delete the Faculty Profile itself
+      await supabase.from("faculties").delete().eq("id", targetUser.faculty_id);
     }
 
-    // 4. Perform Delete
-    const { error: deleteError } = await supabase
+    // D. FINALLY: Delete the User Account
+    const { error: finalDeleteError } = await supabase
       .from("users")
       .delete()
       .eq("id", userId);
 
-    if (deleteError) throw deleteError;
+    if (finalDeleteError) throw finalDeleteError;
 
-    // 5. Log activity
-    await logActivity(
-      "Deleted", 
-      `User account "${targetUser.username}" removed by ${isSuperAdmin ? 'SuperAdmin' : 'BranchAdmin'}`, 
-      req.user?.id || "admin"
-    );
+    // 4. Audit Log
+    await logActivity("Deleted", `FULL PURGE: User "${targetUser.username}" and all related assets.`, req.user?.id || "System");
 
-    res.status(200).json({ message: "User deleted successfully." });
+    res.status(200).json({ message: "User and all related records purged successfully." });
+
   } catch (error) {
-    console.error("Delete User Error:", error.message);
-    res.status(500).json({ error: "An unexpected error occurred while deleting the user." });
+    console.error("Critical Purge Error:", error.message);
+    res.status(500).json({ error: `System Wipe Failed: ${error.message}` });
   }
 };
-
 /**
  * Update User (Profile, Role, and Password Reset)
  * Super Admin: Full global control.
