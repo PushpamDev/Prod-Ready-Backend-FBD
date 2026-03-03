@@ -6,7 +6,8 @@ const {
   approveAdmission,
   rejectAdmission,
   recordPayment,
-  getAccountDetails,      // NEW consolidated details endpoint
+  getAccountDetails, 
+  uploadAdmissionDocuments,
   getReceiptData
 } = require('../controllers/accountsController');
 const auth = require('../middleware/auth');
@@ -29,5 +30,7 @@ router.post('/payments', auth, recordPayment);
 
 // GET /api/accounts/payments/:paymentId/receipt
 router.get('/payments/:paymentId/receipt', auth, getReceiptData);
+
+router.post('/admissions/:admissionId/upload-docs', auth, uploadAdmissionDocuments);
 
 module.exports = router;

@@ -1,5 +1,14 @@
 // controllers/accountsController.js
 const supabase = require('../db');
+const multer = require('multer');
+const crypto = require('crypto');
+
+// ✅ Multer configuration for memory storage
+const storage = multer.memoryStorage();
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 10 * 1024 * 1024 } 
+}).array('files');
 
 /**
  * @description Get admissions list for the approval page or general accounts view.
@@ -448,4 +457,81 @@ exports.getReceiptData = async (req, res) => {
     console.error(`Error fetching receipt data:`, error);
     res.status(500).json({ error: 'Server error occurred.' });
   }
+};
+
+
+
+exports.uploadAdmissionDocuments = async (req, res) => {
+  const { admissionId } = req.params;
+  const user_id = req.user?.id; // Captured from auth middleware
+
+  upload(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: 'File upload error' });
+    
+    const files = req.files;
+    if (!files || files.length === 0) return res.status(400).json({ error: 'No files provided.' });
+
+    try {
+      // 1. Fetch current record using correct column 'undertaking_files'
+      const { data: admission, error: fetchError } = await supabase
+        .from('admissions')
+        .select('id, undertaking_files') 
+        .eq('id', admissionId)
+        .single();
+
+      if (fetchError || !admission) {
+        console.error("DB Fetch Error:", fetchError);
+        return res.status(404).json({ error: 'Admission record not found.' });
+      }
+
+      // ✅ Use 'undertaking_files' as the source
+      const existingFiles = Array.isArray(admission.undertaking_files) ? admission.undertaking_files : [];
+      const newFilesMetadata = [];
+
+      // 2. Upload to Storage
+      for (const file of files) {
+        const safeName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
+        const filePath = `intakes/${admissionId}/${crypto.randomUUID()}_${safeName}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from('identification')
+          .upload(filePath, file.buffer, {
+            contentType: file.mimetype,
+            upsert: true
+          });
+
+        if (uploadError) throw uploadError;
+
+        const { data: urlData } = supabase.storage.from('identification').getPublicUrl(filePath);
+
+        newFilesMetadata.push({
+          file_name: file.originalname,
+          path: filePath,
+          url: urlData.publicUrl,
+          uploaded_at: new Date().toISOString(),
+          uploaded_by: user_id
+        });
+      }
+
+      // 3. Update the table using 'undertaking_files' column
+      const { error: updateError } = await supabase
+        .from('admissions')
+        .update({
+          undertaking_files: [...existingFiles, ...newFilesMetadata],
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', admissionId);
+
+      if (updateError) throw updateError;
+
+      res.status(200).json({ 
+        message: 'Vault updated successfully', 
+        documents: newFilesMetadata 
+      });
+
+    } catch (error) {
+      console.error('Vault Upload Error:', error);
+      res.status(500).json({ error: 'Internal server error during upload.' });
+    }
+  });
 };

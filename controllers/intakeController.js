@@ -2,16 +2,19 @@ const supabase = require('../db.js');
 const multer = require('multer');
 const crypto = require('crypto');
 
-const upload = multer();
+// ✅ CRITICAL: Explicitly use Memory Storage for cloud-bound buffers
+const storage = multer.memoryStorage();
+const uploadMiddleware = multer({ 
+  storage: storage,
+  limits: { fileSize: 15 * 1024 * 1024 } // Increased limit to 15MB for high-res IDs
+}).array('files'); // Matches the key name used in the frontend
 
 /**
  * CREATE ADMISSION INTAKE
  */
 exports.createIntake = async (req, res) => {
   try {
-    const {
-      student_phone_number,
-    } = req.body;
+    const { student_phone_number } = req.body;
 
     /* 1️⃣ Check if a pending intake already exists */
     const { data: existing } = await supabase
@@ -32,43 +35,20 @@ exports.createIntake = async (req, res) => {
 
     /* 2️⃣ Create fresh intake */
     const {
-      location_id,          // ✅ Captured from Step 1 dropdown
-      student_name,
-      father_name,
-      father_phone_number,
-      email,
-      date_of_birth,
-      date_of_joining,
-      identification_type,
-      identification_number,
-      course_ids,
-      fee_amount,
-      current_address,      
-      permanent_address     
+      location_id, student_name, father_name, father_phone_number,
+      email, date_of_birth, date_of_joining, identification_type,
+      identification_number, course_ids, fee_amount, current_address, permanent_address     
     } = req.body;
 
     const { data, error } = await supabase
       .from('admission_intakes')
       .insert({
-        location_id,        // ✅ Inserted to DB
-        student_name,
-        student_phone_number,
-        father_name,
-        father_phone_number,
-        email,
-        date_of_birth,
-        date_of_joining,
-        identification_type,
-        identification_number,
-        course_ids,
-        fee_amount,
-        current_address,    
-        permanent_address,  
-        video_completed: false,
-        contacts_acknowledged: false,
-        terms_accepted: false,
-        identification_files: [],
-        status: 'draft',
+        location_id, student_name, student_phone_number, father_name,
+        father_phone_number, email, date_of_birth, date_of_joining,
+        identification_type, identification_number, course_ids, fee_amount,
+        current_address, permanent_address,  
+        video_completed: false, contacts_acknowledged: false, terms_accepted: false,
+        identification_files: [], status: 'draft',
       })
       .select('id')
       .single();
@@ -86,97 +66,85 @@ exports.createIntake = async (req, res) => {
   }
 };
 
-
 /**
- * UPLOAD IDENTIFICATION FILES (MULTIPLE, APPEND)
+ * UPLOAD IDENTIFICATION FILES
+ * Now simplified because Multer handles the parsing at the route level.
  */
-exports.uploadIntakeFiles = [
-  upload.array('files'), 
-  async (req, res) => {
-    const { id } = req.params;
-    const files = req.files;
+exports.uploadIntakeFiles = async (req, res) => {
+  const { id } = req.params;
+  const files = req.files; // Already parsed by the route middleware
 
-    try {
-      if (!id) {
-        return res.status(400).json({ error: 'Missing intake ID' });
-      }
+  try {
+    if (!id || id === 'undefined') return res.status(400).json({ error: 'Invalid ID' });
+    if (!files || files.length === 0) return res.status(400).json({ error: 'No files received by server.' });
 
-      if (!files || files.length === 0) {
-        return res.status(400).json({ error: 'No files provided' });
-      }
+    /* 1️⃣ Determine Target Table */
+    let { data: targetRecord } = await supabase
+      .from('admission_intakes')
+      .select('id, identification_files')
+      .eq('id', id)
+      .maybeSingle();
 
-      const { data: intake, error: fetchError } = await supabase
-        .from('admission_intakes')
+    let targetTable = 'admission_intakes';
+
+    if (!targetRecord) {
+      const { data: admission } = await supabase
+        .from('admissions')
         .select('id, identification_files')
         .eq('id', id)
-        .single();
+        .maybeSingle();
 
-      if (fetchError || !intake) {
-        return res.status(404).json({ error: 'Intake not found' });
-      }
+      if (!admission) return res.status(404).json({ error: 'Record not found.' });
+      
+      targetRecord = admission;
+      targetTable = 'admissions';
+    }
 
-      const existingFiles = Array.isArray(intake.identification_files)
-        ? intake.identification_files
-        : [];
+    const existingFiles = Array.isArray(targetRecord.identification_files) ? targetRecord.identification_files : [];
+    const uploadedFilesMetadata = [];
 
-      const uploadedFiles = [];
+    /* 2️⃣ Process Uploads */
+    for (const file of files) {
+      const safeName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
+      const filePath = `intakes/${id}/${crypto.randomUUID()}_${safeName}`;
 
-      for (const file of files) {
-        // ✅ Aggressive sanitization to remove brackets, parentheses, and other invalid characters
-        const safeFileName = file.originalname
-          .replace(/\s+/g, '_')           // Replace spaces with underscores
-          .replace(/[^a-zA-Z0-9._-]/g, '') // Remove anything that isn't alphanumeric, dot, or hyphen
-          .replace(/_{2,}/g, '_');        // Clean up double underscores if any
-
-        const filePath = `intakes/${id}/${crypto.randomUUID()}_${safeFileName}`;
-
-        const { error: uploadError } = await supabase.storage
-          .from('identification')
-          .upload(filePath, file.buffer, {
-            contentType: file.mimetype,
-            upsert: false,
-          });
-
-        if (uploadError) {
-          // If Supabase returns an error, log the specific path that failed
-          console.error(`Upload failed for path: ${filePath}`);
-          throw uploadError;
-        }
-
-        uploadedFiles.push({
-          file_name: file.originalname, // Keep original name for display purposes
-          bucket: 'identification',
-          path: filePath,
-          uploaded_at: new Date().toISOString(),
+      const { error: uploadError } = await supabase.storage
+        .from('identification')
+        .upload(filePath, file.buffer, {
+          contentType: file.mimetype,
+          upsert: true
         });
-      }
 
-      const { error: updateError } = await supabase
-        .from('admission_intakes')
-        .update({
-          identification_files: [...existingFiles, ...uploadedFiles],
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', id);
+      if (uploadError) throw uploadError;
 
-      if (updateError) {
-        throw updateError;
-      }
+      const { data: urlData } = supabase.storage.from('identification').getPublicUrl(filePath);
 
-      return res.status(200).json({
-        success: true,
-        uploaded_count: uploadedFiles.length,
-        uploaded: uploadedFiles,
-      });
-
-    } catch (err) {
-      console.error('Upload Intake Files Error:', err);
-      return res.status(500).json({
-        error: err.message || 'Failed to upload identification documents',
+      uploadedFilesMetadata.push({
+        file_name: file.originalname,
+        path: filePath,
+        url: urlData.publicUrl,
+        uploaded_at: new Date().toISOString()
       });
     }
-  },
-];
+
+    /* 3️⃣ Update DB */
+    const { error: updateError } = await supabase
+      .from(targetTable)
+      .update({
+        identification_files: [...existingFiles, ...uploadedFilesMetadata],
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id);
+
+    if (updateError) throw updateError;
+
+    res.status(200).json({ success: true, files: uploadedFilesMetadata });
+
+  } catch (err) {
+    console.error('Upload Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+};
 
 /**
  * LIST ALL INTAKES
@@ -189,7 +157,6 @@ exports.listIntakes = async (req, res) => {
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-
     res.json(data);
   } catch (err) {
     console.error('List Intakes Error:', err);
@@ -202,7 +169,6 @@ exports.listIntakes = async (req, res) => {
  */
 exports.proceedToAdmission = async (req, res) => {
   const { id } = req.params;
-
   try {
     const { data, error } = await supabase
       .from('admission_intakes')
@@ -210,13 +176,11 @@ exports.proceedToAdmission = async (req, res) => {
       .eq('id', id)
       .single();
 
-    if (error || !data) {
-      return res.status(404).json({ error: 'Intake not found' });
-    }
+    if (error || !data) return res.status(404).json({ error: 'Intake not found' });
 
     res.json({
       prefill: {
-        location_id: data.location_id,            // ✅ Included in prefill
+        location_id: data.location_id,
         student_name: data.student_name,
         student_phone_number: data.student_phone_number,
         father_name: data.father_name,
@@ -229,7 +193,6 @@ exports.proceedToAdmission = async (req, res) => {
         permanent_address: data.permanent_address  
       }
     });
-
   } catch (err) {
     console.error('Proceed To Admission Error:', err);
     res.status(500).json({ error: 'Failed to proceed to admission' });
@@ -241,44 +204,26 @@ exports.proceedToAdmission = async (req, res) => {
  */
 exports.finalizeIntake = async (req, res) => {
   const { id } = req.params;
-
   try {
-    // 1. Fetch current intake status
     const { data: intake, error: fetchError } = await supabase
       .from('admission_intakes')
       .select('id, status')
       .eq('id', id)
       .single();
 
-    if (fetchError || !intake) {
-      return res.status(404).json({ error: 'Intake record not found' });
-    }
+    if (fetchError || !intake) return res.status(404).json({ error: 'Intake record not found' });
+    if (intake.status === 'submitted') return res.status(200).json({ success: true, message: 'Already submitted' });
 
-    if (intake.status === 'submitted') {
-      return res.status(200).json({
-        success: true,
-        message: 'Already submitted',
-      });
-    }
+    const { video_completed, contacts_acknowledged, terms_accepted } = req.body;
 
-    const {
-      video_completed,
-      contacts_acknowledged,
-      terms_accepted,
-    } = req.body;
-
-    const isVideoDone = video_completed === true || video_completed === 'true';
-    const isContactsDone = contacts_acknowledged === true || contacts_acknowledged === 'true';
-    const isTermsDone = terms_accepted === true || terms_accepted === 'true';
+    const isVideoDone = video_completed === true || String(video_completed) === 'true';
+    const isContactsDone = contacts_acknowledged === true || String(contacts_acknowledged) === 'true';
+    const isTermsDone = terms_accepted === true || String(terms_accepted) === 'true';
 
     if (!isVideoDone || !isContactsDone || !isTermsDone) {
-      return res.status(400).json({
-        error: 'All undertaking steps must be completed',
-        received: { video_completed, contacts_acknowledged, terms_accepted } 
-      });
+      return res.status(400).json({ error: 'All undertaking steps must be completed' });
     }
 
-    // 2. Perform the update
     const { error: updateError } = await supabase
       .from('admission_intakes')
       .update({
@@ -292,17 +237,9 @@ exports.finalizeIntake = async (req, res) => {
 
     if (updateError) throw updateError;
 
-    return res.status(200).json({
-      success: true,
-      mode: 'INTAKE',
-      intake_id: id,
-    });
-
+    return res.status(200).json({ success: true, mode: 'INTAKE', intake_id: id });
   } catch (err) {
     console.error('Finalize Intake Error:', err);
-    return res.status(500).json({
-      error: 'Failed to finalize intake',
-      details: err.message
-    });
+    return res.status(500).json({ error: 'Failed to finalize intake' });
   }
 };
