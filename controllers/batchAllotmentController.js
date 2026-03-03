@@ -5,15 +5,12 @@ const supabase = require('../db');
    GET BATCH ALLOTMENT LIST (LOCATION & ROLE AWARE)
    =========================================================== */
 exports.getBatchAllotmentList = async (req, res) => {
-  // Ensure locationId is treated as a Number for database comparison
   const userLocationId = req.locationId ? Number(req.locationId) : null;
   const isSuperAdmin = req.isSuperAdmin;
 
   try {
-    // ✅ Extract search and optional location_id for Super Admin filtering
-    const { search = '', location_id } = req.query;
+    const { search = '', location_id, filter = 'all_pending' } = req.query;
 
-    /* -------------------- 1️⃣ Fetch Unified Data from View -------------------- */
     let query = supabase
       .from('v_admission_financial_summary')
       .select(`
@@ -30,20 +27,35 @@ exports.getBatchAllotmentList = async (req, res) => {
         joined
       `);
 
-    /* -------------------- 🛡️ ROLE-BASED LOCATION LOGIC -------------------- */
+    /* --- 🛡️ LOCATION FILTERING --- */
     if (isSuperAdmin) {
-      // ✅ Super Admin: Filter by specific city if provided, otherwise show global
-      if (location_id && location_id !== 'all' && location_id !== 'All') {
+      if (location_id && !['all', 'All'].includes(location_id)) {
         query = query.eq('location_id', Number(location_id));
       }
     } else {
-      // ✅ Standard Admin: Strictly restricted to their own branch
-      if (!userLocationId) {
-        return res.status(401).json({ error: 'Location context missing.' });
-      }
+      if (!userLocationId) return res.status(401).json({ error: 'Location context missing.' });
       query = query.eq('location_id', userLocationId);
     }
 
+    /* --- 🔍 IMPROVED FILTER LOGIC --- */
+    // 1. Allotted but Not Joined: Batch array has items AND joined is false
+    if (filter === 'allotted_not_joined') {
+      query = query
+        .not('batch_names', 'is', null)
+        .filter('batch_names', 'cs', '{}') // 'cs' (contains) ensures it's an array type
+        .neq('batch_names', '{}')          // Exclude empty arrays
+        .eq('joined', false);
+    } 
+    // 2. Joined: Strictly those who have started
+    else if (filter === 'joined') {
+      query = query.eq('joined', true);
+    } 
+    // 3. Pending: Default view (Not yet joined)
+    else if (filter === 'all_pending') {
+      query = query.eq('joined', false);
+    }
+
+    /* --- 🔎 SEARCH & SORT --- */
     if (search) {
       query = query.or(`student_name.ilike.%${search}%,admission_number.ilike.%${search}%,student_phone_number.ilike.%${search}%`);
     }
@@ -51,10 +63,9 @@ exports.getBatchAllotmentList = async (req, res) => {
     const { data: admissions, error } = await query.order('date_of_admission', { ascending: false });
 
     if (error) throw error;
-    
-    if (!admissions || admissions.length === 0) return res.json([]);
+    if (!admissions) return res.json([]);
 
-    /* -------------------- 2️⃣ Final Response Construction -------------------- */
+    /* --- 🏗️ RESPONSE MAPPING --- */
     const result = admissions.map(row => ({
         admission_id: row.admission_id,
         admission_number: row.admission_number,
@@ -62,20 +73,16 @@ exports.getBatchAllotmentList = async (req, res) => {
         student_phone_number: row.student_phone_number,
         course_name: row.courses_str || 'No Course Selected',
         admission_date: row.date_of_admission,
-        batch_names: row.batch_names || [],
+        batch_names: Array.isArray(row.batch_names) ? row.batch_names : [],
         joined: row.joined ?? false,
         joining_date: row.course_start_date ?? null,
         remarks: row.remarks ?? '',
-        location_id: row.location_id // ✅ Returning location_id for UI branch badges
+        location_id: row.location_id
     }));
 
     res.json(result);
 
   } catch (err) {
-    if (err.name === 'TypeError' && err.message.includes('fetch')) {
-      console.error('CRITICAL: Network connection to Supabase failed.');
-      return res.status(503).json({ error: 'Database connection offline.' });
-    }
     console.error('Batch Allotment Fetch Error:', err);
     res.status(500).json({ error: 'Failed to load batch allotment list' });
   }
